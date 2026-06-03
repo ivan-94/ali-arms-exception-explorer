@@ -5,6 +5,10 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .arms-exceptions/data/
+.arms-exceptions/setup/
+.arms-exceptions/triage/
+.arms-exceptions/worktrees/
+.arms-exceptions/lark-notify.local.json
 *.sqlite
 *.sqlite3
 tmp/

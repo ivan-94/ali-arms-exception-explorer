@@ -46,6 +46,10 @@ class ConfigTests(unittest.TestCase):
             content = gitignore.read_text(encoding="utf-8")
 
         self.assertIn("data/", content)
+        self.assertIn("setup/", content)
+        self.assertIn("triage/", content)
+        self.assertIn("worktrees/", content)
+        self.assertIn("lark-notify.local.json", content)
         self.assertIn("*.sqlite", content)
         self.assertIn("*.sqlite-wal", content)
         self.assertNotIn("config.json", content)
@@ -63,6 +67,10 @@ class ConfigTests(unittest.TestCase):
 
         self.assertIn("custom-local-file", content)
         self.assertIn("data/", content)
+        self.assertIn("setup/", content)
+        self.assertIn("triage/", content)
+        self.assertIn("worktrees/", content)
+        self.assertIn("lark-notify.local.json", content)
         self.assertIn("*.sqlite3", content)
 
     def test_existing_target_merges_services_by_default(self) -> None:

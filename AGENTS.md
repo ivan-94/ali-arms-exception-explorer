@@ -10,6 +10,10 @@
 
 - `arms-exceptions-explorer`：拉取、聚合并查看阿里云 ARMS 异常 Span。
 - `yunxiao-mr`：管理云效 Codeup 合并请求，包括创建、列举、查看、更新、评论、项目类标、MR 类标、关闭、重开和合并。
+- `arms-exceptions-triage`：在 CI/Agent 自动流程中分诊一个 ARMS target/service 的异常，二次聚合去重、深度诊断、关联 MR，并对明确 bug 派发 SubAgent(high) 修复。
+- `fix-arms-exception`：从 `status=bug` 的 ARMS 诊断报告出发，在独立 worktree 中 TDD 修复，经 review Sub Agent 审查后创建云效 MR。
+- `lark-notify`：通过飞书/Lark 自定义机器人 Webhook 发送 Agent 通知。
+- `setup-arms-workflow`：在宿主项目检查依赖、发现 ARMS/SLS 配置、初始化 ARMS/Yunxiao/Lark，并生成本地 setup 报告。
 
 重要边界：
 
@@ -51,6 +55,31 @@ skills/yunxiao-mr/scripts/acceptance.sh
 skills/yunxiao-mr/scripts/test_*.py
 ```
 
+当前编排型 skill 使用：
+
+```text
+skills/arms-exceptions-triage/SKILL.md
+skills/arms-exceptions-triage/references/workflow.md
+skills/fix-arms-exception/SKILL.md
+skills/fix-arms-exception/references/workflow.md
+```
+
+当前 `lark-notify` 使用：
+
+```text
+skills/lark-notify/SKILL.md
+skills/lark-notify/references/cli.md
+skills/lark-notify/scripts/cli.py
+skills/lark-notify/scripts/test_*.py
+```
+
+当前 `setup-arms-workflow` 使用：
+
+```text
+skills/setup-arms-workflow/SKILL.md
+skills/setup-arms-workflow/references/workflow.md
+```
+
 ## Skill Guidelines
 
 - `SKILL.md` 面向 Agent，写最短可执行流程、触发条件、关键规则和必要入口；不要堆入长篇背景。
@@ -90,7 +119,8 @@ skills/yunxiao-mr/scripts/test_*.py
 
 ## Security Rules
 
-- 不要打印、保存或提交凭证：AccessKey、Secret、Token、OAuth code、签名、Authorization header、签名 URL 等。
+- 不要打印或提交凭证：AccessKey、Secret、Token、OAuth code、签名、Authorization header、签名 URL 等。
+- `lark-notify` 允许把飞书 Webhook 保存到本地忽略文件 `.arms-exceptions/lark-notify.local.json`，但不能提交、打印完整 URL 或写入报告。
 - 项目配置只保存非凭证信息，例如 target、branch、region、service、app id、默认窗口等。
 - CLI 不应主动绕过官方凭证链；需要切换身份时，引导用户在对应官方工具中切换默认身份。
 - 本地数据目录、SQLite 数据库、缓存和临时同步数据不能提交。
@@ -102,6 +132,8 @@ skills/yunxiao-mr/scripts/test_*.py
 
 - `doctor`：检查本地工具、默认凭证和 API 连通性。
 - `apps`：列出当前身份可见的应用或服务。
+- `sls projects`：列出当前身份可见的 SLS Project。
+- `sls logstores`：列出指定 Project/endpoint 下的 SLS Logstore。
 - `init`：初始化或更新宿主项目配置。
 - `targets`：列出已配置的 target/service。
 - `sync`：按明确范围同步异常数据。
@@ -111,7 +143,8 @@ skills/yunxiao-mr/scripts/test_*.py
 当前行为约束：
 
 - `doctor` 在没有项目配置时应返回未就绪状态，并引导用户执行后续配置命令。
-- `init` 应创建本地数据忽略规则，确保本地数据不会被提交，但不要忽略可提交的项目配置。
+- `init` 应创建本地数据忽略规则，确保本地数据、setup、triage、worktrees 和本地 Webhook 不会被提交，但不要忽略可提交的项目配置。
+- `sls projects/logstores` 只读发现 SLS 配置，不写入 `.arms-exceptions/config.json`。
 - `sync`、`groups` 必须显式指定范围；`show <group_id>` 可以在本地库中唯一定位时省略范围。
 - `groups` 表格里的 `message` 是缩略展示；完整错误信息、堆栈和原始 tags 应通过 `show` 查看。
 
@@ -136,6 +169,39 @@ skills/yunxiao-mr/scripts/test_*.py
 - 项目类标创建后需要清理时使用 `label delete <name-or-id>`；同名类标要改用 ID。
 - 真实验收脚本只能在用户明确授权真实 Codeup 仓库操作时运行。
 
+`lark-notify` 当前核心命令：
+
+- `config --webhook-url <url>`：保存飞书自定义机器人 Webhook 到 `.arms-exceptions/lark-notify.local.json`，并确保本地 `.gitignore` 忽略它。
+- `config --show`：显示配置状态和脱敏 Webhook。
+- `send --title ... --body-file ... --format text|card`：发送文本或卡片通知。
+- `send --json-file ... --format raw`：发送已构造好的原始飞书 payload。
+- `send ... --dry-run`：渲染、检查大小和截断状态，不发送请求。
+
+当前行为约束：
+
+- Webhook 读取优先级是 `.arms-exceptions/lark-notify.local.json` > `ARMS_LARK_WEBHOOK_URL`。
+- 默认不打印完整 Webhook；错误、dry-run 和 JSON 输出都要避免泄露完整 URL。
+- text/card payload 超过 20 KB 时应截断正文并保留本地报告路径；raw payload 超限直接失败。
+- 真实飞书发送只有在用户已配置 Webhook 并明确要求发送时运行。
+
+`arms-exceptions-triage` / `fix-arms-exception` 当前行为约束：
+
+- `arms-exceptions-triage` 一次只处理一个 target；service 输入必须能从 `targets --json` 唯一反查到 target。
+- target 分支必须来自 `.arms-exceptions/config.json`；缺失时停止，不猜默认分支。
+- 分诊产物写入宿主项目 `.arms-exceptions/triage/<run-id>/`，并要求忽略提交。
+- `group_id` 只作为本次运行内定位，不作为 MR 覆盖强证据。
+- 默认面向 CI 自动完整执行；对 `status=bug` 且未被强证据 MR 覆盖的项派发 SubAgent(high) 执行 `fix-arms-exception`。只有调用方显式 triage-only/只分诊时跳过修复。
+- `fix-arms-exception` 必须从 `status=bug` 的诊断报告开始，可自动 push 自己创建的 `fix/arms-...` 分支并创建 MR，但不自动合并。
+
+`setup-arms-workflow` 当前行为约束：
+
+- 它是编排型 skill，不新增 setup CLI。
+- setup 产物写入宿主项目 `.arms-exceptions/setup/`，并要求忽略提交。
+- ARMS app、target、branch、service 和 SLS project/logstore 必须由用户确认；不要从模糊搜索结果自动选择。
+- Yunxiao setup 只运行 doctor；缺少 `YUNXIAO_ACCESS_TOKEN` 时引导用户设置环境变量，不保存 token。
+- Lark setup 可以保存本地 Webhook，但 setup 阶段不发送真实通知。
+- 不自动修改宿主 `AGENTS.md`、`CLAUDE.md` 或 CI 配置；只在报告里写建议片段。
+
 ## Testing
 
 默认测试命令：
@@ -143,6 +209,7 @@ skills/yunxiao-mr/scripts/test_*.py
 ```bash
 python3 -m unittest discover -s skills/arms-exceptions-explorer/scripts -p 'test_*.py'
 python3 -m unittest discover -s skills/yunxiao-mr/scripts -p 'test_*.py'
+python3 -m unittest discover -s skills/lark-notify/scripts -p 'test_*.py'
 ```
 
 本地 smoke test：
@@ -151,8 +218,11 @@ python3 -m unittest discover -s skills/yunxiao-mr/scripts -p 'test_*.py'
 python3 skills/arms-exceptions-explorer/scripts/cli.py doctor --skip-api
 python3 skills/arms-exceptions-explorer/scripts/cli.py --help
 python3 skills/arms-exceptions-explorer/scripts/cli.py show --help
+python3 skills/arms-exceptions-explorer/scripts/cli.py sls projects --help
 python3 skills/yunxiao-mr/scripts/cli.py doctor --json --skip-api
 python3 skills/yunxiao-mr/scripts/cli.py label delete --help
+python3 skills/lark-notify/scripts/cli.py config --show
+python3 skills/lark-notify/scripts/cli.py send --title "测试通知" --body "hello" --format card --dry-run
 ```
 
 真实外部服务 smoke test 只有在用户已授权并明确允许时运行。运行时只输出必要结果，避免泄露凭证和敏感业务数据。

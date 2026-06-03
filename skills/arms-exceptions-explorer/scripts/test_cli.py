@@ -231,6 +231,64 @@ class CliTests(unittest.TestCase):
         self.assertIn("完整帮助", stderr)
         self.assertIn("groups --help", stderr)
 
+    def test_sls_projects_json_lists_projects(self) -> None:
+        with mock.patch.object(app, "build_client", return_value=FakeClient()):
+            code, stdout, stderr = self.run_main(["sls", "projects", "--json"])
+
+        self.assertEqual(code, 0, stderr)
+        payload = json.loads(stdout)
+        self.assertEqual(payload, {"projects": [{"project": "ai-service-logs"}]})
+
+    def test_sls_without_subcommand_prints_sls_help(self) -> None:
+        code, stdout, stderr = self.run_main(["sls"])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr, "")
+        self.assertIn("列出当前 aliyun 默认凭证可见的 SLS Project", stdout)
+        self.assertIn("projects", stdout)
+        self.assertIn("logstores", stdout)
+
+    def test_sls_projects_text_lists_projects(self) -> None:
+        with mock.patch.object(app, "build_client", return_value=FakeClient()):
+            code, stdout, stderr = self.run_main(["sls", "projects"])
+
+        self.assertEqual(code, 0, stderr)
+        self.assertIn("project", stdout)
+        self.assertIn("ai-service-logs", stdout)
+
+    def test_sls_logstores_json_lists_logstores(self) -> None:
+        with mock.patch.object(app, "build_client", return_value=FakeClient()):
+            code, stdout, stderr = self.run_main(
+                [
+                    "sls",
+                    "logstores",
+                    "--project",
+                    "ai-service-logs",
+                    "--endpoint",
+                    "cn-beijing.log.aliyuncs.com",
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(code, 0, stderr)
+        payload = json.loads(stdout)
+        self.assertEqual(
+            payload,
+            {
+                "project": "ai-service-logs",
+                "endpoint": "cn-beijing.log.aliyuncs.com",
+                "logstores": ["app-log"],
+            },
+        )
+
+    def test_sls_logstores_requires_project_and_endpoint(self) -> None:
+        code, stdout, stderr = self.run_main(["sls", "logstores", "--project", "ai-service-logs"])
+
+        self.assertEqual(code, 2)
+        self.assertEqual(stdout, "")
+        self.assertIn("缺少必需参数", stderr)
+        self.assertIn("--endpoint", stderr)
+
     def test_sync_requires_target_or_service_and_lists_options(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / ".arms-exceptions" / "config.json"

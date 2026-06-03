@@ -23,6 +23,8 @@ python3 skills/arms-exceptions-explorer/scripts/cli.py <command>
 | 找不到 `aliyun` CLI | 引导用户按官方文档安装，然后重跑 `doctor` |
 | 未鉴权或无 ARMS 权限 | `aliyun configure get`，再引导用户完成 OAuth 或组织要求的默认凭证配置 |
 | 找 ARMS 应用名 | `apps --region <region> --search <keyword>` |
+| 找 SLS Project | `sls projects --json` |
+| 找 SLS Logstore | `sls logstores --project <project> --endpoint <endpoint> --json` |
 | 初始化项目配置 | `init` |
 | 查看配置范围 | `targets` |
 | 同步异常 | `sync --target <target>` 或 `sync --service <service>` |
@@ -105,6 +107,13 @@ aliyun configure switch --profile <profile>
 
    列出服务和本地分支之后，可以引导和帮助用户初始化。
 
+   如果需要配置关联日志，先发现 SLS Project/Logstore：
+
+   ```bash
+   python3 skills/arms-exceptions-explorer/scripts/cli.py sls projects --json
+   python3 skills/arms-exceptions-explorer/scripts/cli.py sls logstores --project <project> --endpoint <endpoint> --json
+   ```
+
 3. 查看宿主项目配置(target 包含的 Services, 以及绑定的本地分支)：
 
    ```bash
@@ -150,6 +159,7 @@ aliyun configure switch --profile <profile>
 - 只有摘要事件不够时才用 `show --raw-span`；原始 span 可能很大。
 - `show` 默认查询 SLS 关联日志；不需要日志或担心外部查询时加 `--no-logs`。
 - SLS 是可选增强；`doctor` 中 SLS 状态不影响 ARMS 主流程。
+- `sls projects` 和 `sls logstores` 只做只读发现，不会写配置。
 - 关联日志默认按 `trace_id` 做全文查询，不按字段名或 span_id 过滤。
 - 完整 SLS raw log 可能包含敏感业务数据，只能在确实需要时用 `--raw-logs --json` 或 `logs --raw --json`。
 - 下游工具或后续分析需要结构化数据时使用 `--json`。

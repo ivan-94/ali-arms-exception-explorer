@@ -8,6 +8,102 @@
 
 - **ARMS Exceptions Explorer**：拉取、聚合并查看阿里云 ARMS 异常调用链 Span。
 - **Yunxiao MR**：在云效 Codeup 仓库创建、查看、更新、评论、打类标、关闭、重开和合并 MR。
+- **ARMS Exceptions Triage**：对一个 ARMS target/service 做二次聚合、去重、诊断、MR 关联和可选修复调度。
+- **Fix ARMS Exception**：从已确认 `status=bug` 的诊断报告出发，用 TDD 修复异常并创建云效 MR。
+- **Lark Notify**：通过飞书/Lark 自定义机器人 Webhook 发送分诊、修复和验收通知。
+- **Setup ARMS Workflow**：在宿主项目检查依赖、发现 ARMS/SLS 配置，并生成本地 setup 报告。
+
+## 工作流配置
+
+第一次在宿主项目接入完整 ARMS 异常工作流时安装：
+
+```bash
+for skill in setup-arms-workflow arms-exceptions-explorer arms-exceptions-triage fix-arms-exception yunxiao-mr lark-notify; do
+  npx skills@latest add ivan-94/ali-arms-exception-explorer --skill "$skill" -a codex
+done
+```
+
+让 Agent 执行：
+
+```text
+使用 setup-arms-workflow 配置当前项目的 ARMS 异常分诊流程
+```
+
+`setup-arms-workflow` 会检查 `aliyun`、ARMS app、SLS project/logstore、云效 remote/token 和飞书 Webhook 配置，产物写到：
+
+```text
+.arms-exceptions/setup/
+```
+
+它不会运行 ARMS sync、创建 MR/类标、发送真实飞书通知，也不会自动修改宿主 `AGENTS.md` 或 `CLAUDE.md`。
+
+## ARMS 异常分诊和修复
+
+在需要完整处理 ARMS 异常的项目里安装相关 skills：
+
+```bash
+for skill in setup-arms-workflow arms-exceptions-explorer arms-exceptions-triage fix-arms-exception yunxiao-mr lark-notify; do
+  npx skills@latest add ivan-94/ali-arms-exception-explorer --skill "$skill" -a codex
+done
+```
+
+典型流程：
+
+```bash
+python3 skills/arms-exceptions-explorer/scripts/cli.py doctor
+python3 skills/arms-exceptions-explorer/scripts/cli.py targets --json
+python3 skills/arms-exceptions-explorer/scripts/cli.py sls projects --json
+python3 skills/lark-notify/scripts/cli.py config --show
+```
+
+让 Agent 执行：
+
+```text
+使用 arms-exceptions-triage 分诊 target production 的异常
+```
+
+`arms-exceptions-triage` 面向 CI/Agent 自动完整执行：默认会拉取、聚合、诊断、查 MR，并对未被已有 MR 覆盖的 `status=bug` 诊断报告派发 SubAgent(high) 调用 `fix-arms-exception`。只有调用方显式指定 triage-only/只分诊时，才跳过修复阶段。
+
+分诊产物保存在宿主项目本地：
+
+```text
+.arms-exceptions/triage/<run-id>/
+```
+
+这个目录必须忽略提交。完整流程见 **[skills/arms-exceptions-triage](./skills/arms-exceptions-triage/SKILL.md)** 和 **[skills/fix-arms-exception](./skills/fix-arms-exception/SKILL.md)**。
+
+## Lark Notify
+
+在需要把 Agent 结果发送到飞书群的项目里安装：
+
+```bash
+npx skills@latest add ivan-94/ali-arms-exception-explorer \
+  --skill lark-notify \
+  -a codex
+```
+
+保存飞书自定义机器人 Webhook：
+
+```bash
+python3 skills/lark-notify/scripts/cli.py config --webhook-url <webhook>
+```
+
+Webhook 读取优先级：
+
+1. `.arms-exceptions/lark-notify.local.json`
+2. `ARMS_LARK_WEBHOOK_URL`
+
+本地 Webhook 文件必须忽略提交。发送前建议先 dry-run：
+
+```bash
+python3 skills/lark-notify/scripts/cli.py send \
+  --title "ARMS 异常分诊" \
+  --body-file .arms-exceptions/triage/<run-id>/summary.md \
+  --format card \
+  --dry-run
+```
+
+完整说明见 **[skills/lark-notify](./skills/lark-notify/SKILL.md)**。
 
 ## Yunxiao MR
 
@@ -72,6 +168,7 @@ aliyun configure --mode OAuth
 ```bash
 python3 skills/arms-exceptions-explorer/scripts/cli.py doctor
 python3 skills/arms-exceptions-explorer/scripts/cli.py apps --region cn-beijing --search my-service
+python3 skills/arms-exceptions-explorer/scripts/cli.py sls projects --json
 python3 skills/arms-exceptions-explorer/scripts/cli.py init
 python3 skills/arms-exceptions-explorer/scripts/cli.py sync --target staging
 python3 skills/arms-exceptions-explorer/scripts/cli.py groups --target staging
@@ -153,6 +250,10 @@ SLS 配置只保存 `project`、`logstore`、`endpoint` 和默认查询窗口等
 
 ```text
 .arms-exceptions/data/
+.arms-exceptions/setup/
+.arms-exceptions/triage/
+.arms-exceptions/worktrees/
+.arms-exceptions/lark-notify.local.json
 ```
 
 ### 参考
@@ -160,6 +261,11 @@ SLS 配置只保存 `project`、`logstore`、`endpoint` 和默认查询窗口等
 ### Skill
 
 - **[arms-exceptions-explorer](./skills/arms-exceptions-explorer/SKILL.md)** - 从宿主项目拉取、聚合并查看阿里云 ARMS 异常 Span。
+- **[arms-exceptions-triage](./skills/arms-exceptions-triage/SKILL.md)** - 分诊一个 ARMS target/service 的异常。
+- **[fix-arms-exception](./skills/fix-arms-exception/SKILL.md)** - 修复已确认可修的 ARMS 异常。
+- **[yunxiao-mr](./skills/yunxiao-mr/SKILL.md)** - 管理云效 Codeup 合并请求。
+- **[lark-notify](./skills/lark-notify/SKILL.md)** - 通过飞书/Lark 自定义机器人 Webhook 发送通知。
+- **[setup-arms-workflow](./skills/setup-arms-workflow/SKILL.md)** - 配置宿主项目的完整 ARMS 异常工作流。
 
 ### CLI
 
@@ -169,11 +275,13 @@ SLS 配置只保存 `project`、`logstore`、`endpoint` 和默认查询窗口等
 | --- | --- |
 | `doctor` | 检查本地 `aliyun` CLI 和 ARMS API 访问。 |
 | `apps` | 列出当前身份可见的 ARMS TRACE 应用。 |
+| `sls` | 列出当前身份可见的 SLS Project 和指定 Project 下的 Logstore。 |
 | `init` | 创建或更新 `.arms-exceptions/config.json`。 |
 | `targets` | 查看已配置的 target 和 service。 |
 | `sync` | 为一个 target 或 service 拉取最近的异常 Span。 |
 | `groups` | 从本地数据库列出异常聚合组。 |
 | `show` | 查看一个异常组的样本堆栈、occurrence 和原始数据。 |
+| `logs` | 只查看一个异常组的 SLS 关联日志。 |
 
 <details>
 <summary>项目配置示例</summary>
@@ -214,12 +322,21 @@ SLS 配置只保存 `project`、`logstore`、`endpoint` 和默认查询窗口等
 
 ```bash
 python3 -m unittest discover -s skills/arms-exceptions-explorer/scripts -p 'test_*.py'
+python3 -m unittest discover -s skills/yunxiao-mr/scripts -p 'test_*.py'
+python3 -m unittest discover -s skills/lark-notify/scripts -p 'test_*.py'
 ```
 
 运行不调用 ARMS 的本地 smoke test：
 
 ```bash
 python3 skills/arms-exceptions-explorer/scripts/cli.py doctor --skip-api
+python3 skills/arms-exceptions-explorer/scripts/cli.py --help
+python3 skills/arms-exceptions-explorer/scripts/cli.py show --help
+python3 skills/arms-exceptions-explorer/scripts/cli.py sls projects --help
+python3 skills/yunxiao-mr/scripts/cli.py doctor --json --skip-api
+python3 skills/yunxiao-mr/scripts/cli.py label delete --help
+python3 skills/lark-notify/scripts/cli.py config --show
+python3 skills/lark-notify/scripts/cli.py send --title "测试通知" --body "hello" --format card --dry-run
 ```
 
 运行真实 ARMS smoke test：

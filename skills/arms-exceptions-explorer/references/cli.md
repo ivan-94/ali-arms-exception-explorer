@@ -34,6 +34,37 @@ python3 skills/arms-exceptions-explorer/scripts/cli.py apps --region cn-beijing 
 
 主路径使用 `SearchTraceAppByPage`。失败时 fallback 到 `ListTraceApps`，并在本地过滤 `Type == "TRACE"`。
 
+## SLS 发现
+
+```bash
+python3 skills/arms-exceptions-explorer/scripts/cli.py sls projects
+python3 skills/arms-exceptions-explorer/scripts/cli.py sls projects --json
+python3 skills/arms-exceptions-explorer/scripts/cli.py sls logstores --project ai-service-logs --endpoint cn-beijing.log.aliyuncs.com
+python3 skills/arms-exceptions-explorer/scripts/cli.py sls logstores --project ai-service-logs --endpoint cn-beijing.log.aliyuncs.com --json
+```
+
+`sls projects` 使用当前 `aliyun` 默认凭证列出可见 Project。`sls logstores` 必须显式提供 `--project` 和 `--endpoint`，避免跨地域误查。两个命令都是只读发现，不会写入 `.arms-exceptions/config.json`。
+
+JSON 输出：
+
+```json
+{
+  "projects": [
+    {
+      "project": "ai-service-logs"
+    }
+  ]
+}
+```
+
+```json
+{
+  "project": "ai-service-logs",
+  "endpoint": "cn-beijing.log.aliyuncs.com",
+  "logstores": ["app-log"]
+}
+```
+
 ## 初始化
 
 交互式：
