@@ -28,8 +28,11 @@ python3 skills/arms-exceptions-explorer/scripts/cli.py <command>
 | 同步异常 | `sync --target <target>` 或 `sync --service <service>` |
 | 查看异常组 | `groups --target <target>` 或 `groups --service <service>` |
 | 查看详情 | `show <group_id> --target <target>` 或 `show <group_id> --service <service>` |
+| 只看关联日志 | `logs <group_id> --target <target>` |
+| 关闭 show 中的日志查询 | `show <group_id> --no-logs ...` |
 | 需要原始异常 tags | `show <group_id> --raw-event ...` |
 | 需要原始 span JSON | `show <group_id> --raw-span --json ...` |
+| 需要原始 SLS 日志 | `show <group_id> --raw-logs --json ...` 或 `logs <group_id> --raw --json ...` |
 
 完整参数、JSON 输出和配置结构见 `references/cli.md`。
 
@@ -126,19 +129,32 @@ aliyun configure switch --profile <profile>
    python3 skills/arms-exceptions-explorer/scripts/cli.py show <group_id> --target <target>
    ```
 
-7. 用 `top_stack_frame`、`stacktrace`、`trace_id`、`span_id`、`service_name`、`operation_name` 和 occurrence 信息回到代码排查。
+   `show` 默认会在 service 已配置 SLS 时按 `trace_id` 查询关联日志。日志不可用时继续使用 ARMS 异常证据，不要把 `related_logs: not_configured`、`empty` 或 `failed` 当作异常不存在。
+
+7. 需要单独重查日志时：
+
+   ```bash
+   python3 skills/arms-exceptions-explorer/scripts/cli.py logs <group_id> --target <target>
+   ```
+
+8. 用 `top_stack_frame`、`stacktrace`、`trace_id`、`span_id`、`service_name`、`operation_name`、occurrence 和关联日志信息回到代码排查。
 
 ## Rules
 
 - 先跑 `doctor`，再做任何 ARMS 调查。
 - 遇到失败时，先执行 CLI 输出里的“下一步”命令，再提出假设。
 - `sync`、`groups`、`show` 必须传 `--target` 或 `--service`；不要静默跨越所有项目。
+- `sync` 默认刷新本次 target/service scope 的本地旧异常数据；需要保留旧数据时显式加 `--keep-old-data`。
 - `sync --target <target>` 中某个 service 失败时，使用 CLI 输出的单 service 重试命令排查。
 - `show --raw-event` 用于查看原始异常 tags 和 stack 字段。
 - 只有摘要事件不够时才用 `show --raw-span`；原始 span 可能很大。
+- `show` 默认查询 SLS 关联日志；不需要日志或担心外部查询时加 `--no-logs`。
+- SLS 是可选增强；`doctor` 中 SLS 状态不影响 ARMS 主流程。
+- 关联日志默认按 `trace_id` 做全文查询，不按字段名或 span_id 过滤。
+- 完整 SLS raw log 可能包含敏感业务数据，只能在确实需要时用 `--raw-logs --json` 或 `logs --raw --json`。
 - 下游工具或后续分析需要结构化数据时使用 `--json`。
 - 不要打印凭证、签名 URL、`AccessKey`、`SecurityToken`、`Signature`、`Authorization`、OAuth code，或可能包含这些内容的原始命令输出。
-- `.arms-exceptions/config.json` 是项目配置，只应包含 target、branch、region、service、pid、app_id 等非凭证信息。
+- `.arms-exceptions/config.json` 是项目配置，只应包含 target、branch、region、service、pid、app_id、SLS project/logstore/endpoint 等非凭证信息。
 
 ## References
 

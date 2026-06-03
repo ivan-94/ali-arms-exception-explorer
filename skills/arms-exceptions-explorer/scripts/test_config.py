@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from arms_exceptions.app import ProjectConfig, ServiceConfig
+from arms_exceptions.app import ProjectConfig, ServiceConfig, SlsConfig
 
 
 class ConfigTests(unittest.TestCase):
@@ -85,6 +85,75 @@ class ConfigTests(unittest.TestCase):
         assert target is not None
         self.assertEqual(target.default_window, "7d")
         self.assertEqual([service.name for service in target.services], ["ai-service-dev", "ai-service-dev-celery-worker"])
+
+    def test_service_sls_config_round_trips(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / ".arms-exceptions" / "config.json"
+            config = ProjectConfig.empty()
+            config.add_or_update_target(
+                target_name="ai-service-dev",
+                branch="dev",
+                default_window="24h",
+                services=[
+                    ServiceConfig(
+                        name="ai-service-dev",
+                        region="cn-beijing",
+                        sls=SlsConfig(
+                            project="ai-service-logs",
+                            logstore="app-log",
+                            endpoint="cn-beijing.log.aliyuncs.com",
+                            default_before_seconds=180,
+                            default_after_seconds=60,
+                            default_limit=20,
+                        ),
+                    )
+                ],
+            )
+            config.save(path)
+
+            loaded = ProjectConfig.load(path)
+
+        target = loaded.get_target("ai-service-dev")
+        assert target is not None
+        self.assertIsNotNone(target.services[0].sls)
+        assert target.services[0].sls is not None
+        self.assertEqual(target.services[0].sls.project, "ai-service-logs")
+        self.assertEqual(target.services[0].sls.logstore, "app-log")
+        self.assertEqual(target.services[0].sls.endpoint, "cn-beijing.log.aliyuncs.com")
+        self.assertEqual(target.services[0].sls.default_before_seconds, 180)
+        self.assertEqual(target.services[0].sls.default_after_seconds, 60)
+        self.assertEqual(target.services[0].sls.default_limit, 20)
+
+    def test_merging_existing_service_preserves_sls_when_new_service_has_none(self) -> None:
+        config = ProjectConfig.empty()
+        config.add_or_update_target(
+            target_name="ai-service-dev",
+            branch="dev",
+            default_window="24h",
+            services=[
+                ServiceConfig(
+                    name="ai-service-dev",
+                    region="cn-beijing",
+                    pid="old-pid",
+                    sls=SlsConfig(project="ai-service-logs", logstore="app-log", endpoint="cn-beijing.log.aliyuncs.com"),
+                )
+            ],
+        )
+
+        config.add_or_update_target(
+            target_name="ai-service-dev",
+            branch="dev",
+            default_window="24h",
+            services=[ServiceConfig(name="ai-service-dev", region="cn-beijing", pid="new-pid")],
+        )
+
+        target = config.get_target("ai-service-dev")
+        assert target is not None
+        self.assertEqual(len(target.services), 1)
+        self.assertEqual(target.services[0].pid, "new-pid")
+        self.assertIsNotNone(target.services[0].sls)
+        assert target.services[0].sls is not None
+        self.assertEqual(target.services[0].sls.project, "ai-service-logs")
 
     def test_replace_target_resets_services(self) -> None:
         config = ProjectConfig.empty()

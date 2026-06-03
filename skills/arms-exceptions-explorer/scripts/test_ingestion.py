@@ -95,6 +95,71 @@ class IngestionTests(unittest.TestCase):
         self.assertIsNotNone(span)
         self.assertIsNone(ok_span)
 
+    def test_sync_defaults_to_fresh_scope_data(self) -> None:
+        start_ms, end_ms = resolve_window_ms("1h")
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = TraceRepository(Path(tmp) / "arms.sqlite")
+            try:
+                repo.conn.execute(
+                    """
+                    insert into error_groups (
+                        group_key, target_name, service_name, operation_name, exception_type, message, updated_at
+                    )
+                    values (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    ("old-group", "ai-service-dev", "ai-service-dev-celery-worker", "old/task", "ValueError", "old boom", "now"),
+                )
+                repo.commit()
+
+                service = TraceIngestionService(client=FakeAliyunClient(), repository=repo)  # type: ignore[arg-type]
+                service.sync_errors(
+                    SyncOptions(
+                        target_name="ai-service-dev",
+                        service=ServiceConfig(name="ai-service-dev-celery-worker"),
+                        start_ms=start_ms,
+                        end_ms=end_ms,
+                    )
+                )
+                groups = repo.list_groups(target_name="ai-service-dev", service_names=["ai-service-dev-celery-worker"], limit=10)
+            finally:
+                repo.close()
+
+        self.assertNotIn("old-group", [row["group_key"] for row in groups])
+        self.assertEqual(len(groups), 1)
+
+    def test_sync_can_keep_old_scope_data(self) -> None:
+        start_ms, end_ms = resolve_window_ms("1h")
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = TraceRepository(Path(tmp) / "arms.sqlite")
+            try:
+                repo.conn.execute(
+                    """
+                    insert into error_groups (
+                        group_key, target_name, service_name, operation_name, exception_type, message, updated_at
+                    )
+                    values (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    ("old-group", "ai-service-dev", "ai-service-dev-celery-worker", "old/task", "ValueError", "old boom", "now"),
+                )
+                repo.commit()
+
+                service = TraceIngestionService(client=FakeAliyunClient(), repository=repo)  # type: ignore[arg-type]
+                service.sync_errors(
+                    SyncOptions(
+                        target_name="ai-service-dev",
+                        service=ServiceConfig(name="ai-service-dev-celery-worker"),
+                        start_ms=start_ms,
+                        end_ms=end_ms,
+                        keep_old_data=True,
+                    )
+                )
+                groups = repo.list_groups(target_name="ai-service-dev", service_names=["ai-service-dev-celery-worker"], limit=10)
+            finally:
+                repo.close()
+
+        self.assertIn("old-group", [row["group_key"] for row in groups])
+        self.assertEqual(len(groups), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

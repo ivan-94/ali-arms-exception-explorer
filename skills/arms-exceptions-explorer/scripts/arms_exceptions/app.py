@@ -87,11 +87,22 @@ class AppInfo:
 
 
 @dataclass(frozen=True)
+class SlsConfig:
+    project: str
+    logstore: str
+    endpoint: str
+    default_before_seconds: int = 120
+    default_after_seconds: int = 120
+    default_limit: int = 50
+
+
+@dataclass(frozen=True)
 class ServiceConfig:
     name: str
     region: str = DEFAULT_REGION
     pid: str | None = None
     app_id: str | None = None
+    sls: SlsConfig | None = None
 
 
 @dataclass(frozen=True)
@@ -170,6 +181,7 @@ class SyncOptions:
     service: ServiceConfig
     start_ms: int
     end_ms: int
+    keep_old_data: bool = False
     operation_name: str | None = None
     page_size: int = 50
     max_pages: int = 20
@@ -275,15 +287,7 @@ class ProjectConfig:
                     "name": target.name,
                     "branch": target.branch,
                     "default_window": target.default_window,
-                    "services": [
-                        {
-                            "name": service.name,
-                            "region": service.region,
-                            "pid": service.pid,
-                            "app_id": service.app_id,
-                        }
-                        for service in target.services
-                    ],
+                    "services": [_service_to_dict(service) for service in target.services],
                 }
                 for target in self.targets
             ],
@@ -345,7 +349,7 @@ class ProjectConfig:
         if replace:
             merged_services = unique_services
         else:
-            merged_services = _dedupe_services([*existing.services, *unique_services])
+            merged_services = _merge_services(existing.services, unique_services)
         self.targets[existing_index] = TargetConfig(
             name=target_name,
             branch=branch if branch is not None else existing.branch,
@@ -368,7 +372,80 @@ def _service_from_raw(value: Any, *, default_region: str = DEFAULT_REGION) -> Se
         region=str(value.get("region") or value.get("RegionId") or default_region),
         pid=_optional_str(value.get("pid") or value.get("Pid") or value.get("PID")),
         app_id=_optional_str(value.get("app_id") or value.get("AppId") or value.get("AppID")),
+        sls=_sls_from_raw(value.get("sls")),
     )
+
+
+def _sls_from_raw(value: Any) -> SlsConfig | None:
+    if not isinstance(value, dict):
+        return None
+    project = str(value.get("project") or "").strip()
+    logstore = str(value.get("logstore") or "").strip()
+    endpoint = str(value.get("endpoint") or "").strip()
+    if not project or not logstore or not endpoint:
+        return None
+    return SlsConfig(
+        project=project,
+        logstore=logstore,
+        endpoint=endpoint,
+        default_before_seconds=_optional_int(value.get("default_before_seconds")) or 120,
+        default_after_seconds=_optional_int(value.get("default_after_seconds")) or 120,
+        default_limit=_optional_int(value.get("default_limit")) or 50,
+    )
+
+
+def _service_to_dict(service: ServiceConfig) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "name": service.name,
+        "region": service.region,
+        "pid": service.pid,
+        "app_id": service.app_id,
+    }
+    if service.sls:
+        payload["sls"] = {
+            "project": service.sls.project,
+            "logstore": service.sls.logstore,
+            "endpoint": service.sls.endpoint,
+            "default_before_seconds": service.sls.default_before_seconds,
+            "default_after_seconds": service.sls.default_after_seconds,
+            "default_limit": service.sls.default_limit,
+        }
+    return payload
+
+
+def extract_sls_names(response: dict[str, Any], *, keys: Sequence[str], name_keys: Sequence[str]) -> list[str]:
+    raw_items: Any = None
+    for key in keys:
+        value = response.get(key)
+        if value:
+            raw_items = value
+            break
+    if isinstance(raw_items, dict):
+        for key in keys:
+            value = raw_items.get(key)
+            if value:
+                raw_items = value
+                break
+    if raw_items is None:
+        raw_items = response.get("data") or response.get("Data") or []
+    if isinstance(raw_items, dict):
+        raw_items = raw_items.get("items") or raw_items.get("Items") or []
+    if not isinstance(raw_items, list):
+        return []
+
+    names: list[str] = []
+    for item in raw_items:
+        if isinstance(item, str):
+            names.append(item)
+            continue
+        if not isinstance(item, dict):
+            continue
+        for key in name_keys:
+            value = item.get(key)
+            if value:
+                names.append(str(value))
+                break
+    return names
 
 
 def _dedupe_services(services: Sequence[ServiceConfig]) -> list[ServiceConfig]:
@@ -379,6 +456,26 @@ def _dedupe_services(services: Sequence[ServiceConfig]) -> list[ServiceConfig]:
             continue
         seen.add(service.name)
         result.append(service)
+    return result
+
+
+def _merge_services(existing: Sequence[ServiceConfig], incoming: Sequence[ServiceConfig]) -> list[ServiceConfig]:
+    result = list(existing)
+    index_by_name = {service.name: index for index, service in enumerate(result)}
+    for service in incoming:
+        existing_index = index_by_name.get(service.name)
+        if existing_index is None:
+            index_by_name[service.name] = len(result)
+            result.append(service)
+            continue
+        previous = result[existing_index]
+        result[existing_index] = ServiceConfig(
+            name=service.name,
+            region=service.region,
+            pid=service.pid,
+            app_id=service.app_id,
+            sls=service.sls if service.sls is not None else previous.sls,
+        )
     return result
 
 
@@ -412,6 +509,13 @@ class AliyunCliClient:
     def version(self) -> str:
         result = self._run([self.executable, "version"])
         return result.stdout.strip() or result.stderr.strip()
+
+    def sls_available(self) -> bool:
+        try:
+            self._run([self.executable, "sls", "help"])
+            return True
+        except AliyunCliError:
+            return False
 
     def search_trace_apps_by_page(
         self,
@@ -530,7 +634,77 @@ class AliyunCliClient:
             ]
         )
 
+    def get_sls_logs(
+        self,
+        *,
+        project: str,
+        logstore: str,
+        endpoint: str,
+        from_s: int,
+        to_s: int,
+        query: str,
+        line: int,
+        reverse: bool = True,
+    ) -> Any:
+        return self._run_json_value(
+            [
+                self.executable,
+                "sls",
+                "GetLogs",
+                "--project",
+                project,
+                "--logstore",
+                logstore,
+                "--from",
+                str(from_s),
+                "--to",
+                str(to_s),
+                "--query",
+                query,
+                "--line",
+                str(line),
+                "--reverse",
+                "true" if reverse else "false",
+                "--endpoint",
+                endpoint,
+            ]
+        )
+
+    def list_sls_projects(self, *, size: int = 100) -> list[str]:
+        response = self._run_json([self.executable, "sls", "ListProject", "--size", str(size)])
+        return extract_sls_names(response, keys=("projects", "Project", "projectNames", "ProjectNames"), name_keys=("projectName", "project", "name"))
+
+    def list_sls_logstores(self, *, project: str, endpoint: str, size: int = 200) -> list[str]:
+        response = self._run_json(
+            [
+                self.executable,
+                "sls",
+                "ListLogStores",
+                "--project",
+                project,
+                "--size",
+                str(size),
+                "--endpoint",
+                endpoint,
+            ]
+        )
+        return extract_sls_names(response, keys=("logstores", "LogStores", "logstoresInfo", "LogStore"), name_keys=("logstoreName", "logstore", "name"))
+
+    def get_trace_app_config(self, *, pid: str) -> dict[str, Any]:
+        return self._run_json([self.executable, "arms", "GetTraceAppConfig", "--Pid", pid])
+
     def _run_json(self, args: list[str]) -> dict[str, Any]:
+        data = self._run_json_value(args)
+        if not isinstance(data, dict):
+            raise AliyunCliError(
+                f"错误: aliyun JSON 输出不是对象: {type(data).__name__}\n\n"
+                "下一步:\n"
+                "  aliyun version\n"
+                "  aliyun configure get"
+            )
+        return data
+
+    def _run_json_value(self, args: list[str]) -> Any:
         result = self._run(args)
         try:
             data = json.loads(result.stdout)
@@ -544,13 +718,6 @@ class AliyunCliClient:
                 "  aliyun version\n"
                 "  aliyun configure get\n"
             ) from exc
-        if not isinstance(data, dict):
-            raise AliyunCliError(
-                f"错误: aliyun JSON 输出不是对象: {type(data).__name__}\n\n"
-                "下一步:\n"
-                "  aliyun version\n"
-                "  aliyun configure get"
-            )
         return data
 
     def _run(self, args: list[str]) -> CliResult:
@@ -732,6 +899,23 @@ class TraceRepository:
         )
         self.conn.commit()
         return int(cur.lastrowid)
+
+    def delete_scope_data(self, *, target_name: str | None, service_names: Sequence[str]) -> int:
+        if not service_names:
+            return 0
+        placeholders = ", ".join("?" for _ in service_names)
+        scope = f"service_name in ({placeholders})"
+        values: list[Any] = list(service_names)
+        if target_name is not None:
+            scope += " and target_name = ?"
+            values.append(target_name)
+
+        deleted = 0
+        for table in ("error_occurrences", "error_events", "error_groups", "raw_spans"):
+            cur = self.conn.execute(f"delete from {table} where {scope}", values)
+            deleted += int(cur.rowcount if cur.rowcount is not None else 0)
+        self.conn.commit()
+        return deleted
 
     def finish_sync_run(
         self,
@@ -1104,6 +1288,8 @@ class TraceIngestionService:
         self.repository = repository
 
     def sync_errors(self, options: SyncOptions) -> SyncSummary:
+        if not options.keep_old_data:
+            self.repository.delete_scope_data(target_name=options.target_name, service_names=[options.service.name])
         run_id = self.repository.begin_sync_run(options)
         try:
             summary = self._sync_errors(run_id, options)
@@ -1356,6 +1542,9 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--region", default=DEFAULT_REGION, help="ARMS 地域")
     init.add_argument("--window", default=DEFAULT_WINDOW, help="默认拉取窗口，例如 24h")
     init.add_argument("--replace", action="store_true", help="同名 target 存在时替换 service 列表")
+    init.add_argument("--sls-project", help="可选 SLS Project，应用到本次 init 的所有 service")
+    init.add_argument("--sls-logstore", help="可选 SLS Logstore，应用到本次 init 的所有 service")
+    init.add_argument("--sls-endpoint", help="可选 SLS endpoint，例如 cn-beijing.log.aliyuncs.com")
     init.add_argument("--json", action="store_true", dest="json_output", default=argparse.SUPPRESS, help="输出机器可读 JSON")
     init.set_defaults(func=cmd_init)
     PARSER_BY_COMMAND["init"] = init
@@ -1415,6 +1604,7 @@ def build_parser() -> argparse.ArgumentParser:
     sync.add_argument("--max-traces", type=int, default=200, help="最多回填 trace 数量")
     sync.add_argument("--trace-page-size", type=int, default=100, help="GetTrace 每页 span 数量")
     sync.add_argument("--max-trace-pages", type=int, default=3, help="每条 trace 最多回填页数")
+    sync.add_argument("--keep-old-data", action="store_true", help="保留本地旧异常数据；默认会先刷新本次 scope 的旧数据")
     sync.add_argument("--json", action="store_true", dest="json_output", default=argparse.SUPPRESS, help="输出机器可读 JSON")
     sync.set_defaults(func=cmd_sync)
     PARSER_BY_COMMAND["sync"] = sync
@@ -1483,9 +1673,40 @@ scope:
     show.add_argument("--limit", type=int, default=20, help="展示 occurrence/event 数量")
     show.add_argument("--raw-span", action="store_true", help="展示样本 raw span JSON")
     show.add_argument("--raw-event", action="store_true", help="展示样本 raw event tags JSON")
+    show.add_argument("--no-logs", action="store_true", help="不查询 SLS 关联日志")
+    show.add_argument("--log-occurrences", type=int, default=1, help="查询关联日志的 occurrence 数量")
+    show.add_argument("--log-before", help="关联日志查询向前窗口，例如 2m")
+    show.add_argument("--log-after", help="关联日志查询向后窗口，例如 2m")
+    show.add_argument("--log-limit", type=int, help="每个 trace 最多返回的关联日志条数")
+    show.add_argument("--raw-logs", action="store_true", help="在 JSON 输出中保留原始 SLS log item")
     show.add_argument("--json", action="store_true", dest="json_output", default=argparse.SUPPRESS, help="输出机器可读 JSON")
     show.set_defaults(func=cmd_show)
     PARSER_BY_COMMAND["show"] = show
+
+    logs = subparsers.add_parser(
+        "logs",
+        help="查看异常组关联 SLS 日志",
+        formatter_class=HelpFormatter,
+        description="按异常组 occurrence 的 trace_id 查询 SLS 关联日志。group_id 本地唯一时可以省略 --target/--service。",
+        epilog=f"""
+示例:
+  {script_name()} logs <group_id>
+  {script_name()} logs <group_id> --target ai-service-dev
+  {script_name()} logs <group_id> --occurrences 3
+  {script_name()} logs <group_id> --before 5m --after 1m --limit 100
+  {script_name()} logs <group_id> --json
+""",
+    )
+    logs.add_argument("group_id", help="异常组 ID")
+    add_scope_args(logs)
+    logs.add_argument("--occurrences", type=int, default=1, help="查询关联日志的 occurrence 数量")
+    logs.add_argument("--before", help="关联日志查询向前窗口，例如 2m")
+    logs.add_argument("--after", help="关联日志查询向后窗口，例如 2m")
+    logs.add_argument("--limit", type=int, help="每个 trace 最多返回的关联日志条数")
+    logs.add_argument("--raw", action="store_true", help="保留原始 SLS log item")
+    logs.add_argument("--json", action="store_true", dest="json_output", default=argparse.SUPPRESS, help="输出机器可读 JSON")
+    logs.set_defaults(func=cmd_logs)
+    PARSER_BY_COMMAND["logs"] = logs
 
     return parser
 
@@ -1535,6 +1756,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         "configured_service_api": "skipped",
         "config": str(args.config),
         "config_exists": args.config.exists(),
+        "sls_api_available": False,
+        "sls_configured_services": 0,
+        "sls_optional": True,
         "status": False,
         "next_steps": [],
     }
@@ -1548,6 +1772,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         )
 
     result["version"] = client.version()
+    config = ProjectConfig.load(args.config)
+    result["sls_api_available"] = bool(client.sls_available())
+    result["sls_configured_services"] = sum(1 for service in config.list_services() if service.sls)
     if args.skip_api:
         result["status"] = True
     else:
@@ -1555,7 +1782,6 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         result["app_list_api"] = "ok"
         result["visible_trace_apps_sample"] = [app.name for app in apps[:3]]
 
-        config = ProjectConfig.load(args.config)
         first_service = config.list_services()[0] if config.list_services() else None
         if first_service:
             start_ms, end_ms = resolve_window_ms("1h", tz_name=DEFAULT_TZ)
@@ -1599,6 +1825,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             print("下一步:")
             for command in result["next_steps"]:
                 print(f"  {command}")
+        print(f"sls_api_available: {str(bool(result['sls_api_available'])).lower()}")
+        print(f"sls_configured_services: {result['sls_configured_services']}")
+        print("sls_optional: true")
         print(f"status: {str(bool(result['status'])).lower()}")
     return 0 if result["status"] else 1
 
@@ -1650,6 +1879,9 @@ def cmd_init_noninteractive(args: argparse.Namespace) -> int:
         )
     client = build_client()
     services = resolve_services_from_apps(client, service_names=args.service, region=args.region)
+    sls = sls_config_from_init_args(args)
+    if sls:
+        services = [replace_service_sls(service, sls) for service in services]
     config = ProjectConfig.load(args.config)
     config.add_or_update_target(
         target_name=args.target,
@@ -1677,11 +1909,133 @@ def cmd_init_noninteractive(args: argparse.Namespace) -> int:
         print("services:")
         for service in services:
             print(f"- {service.name} ({service.region})")
+        if sls:
+            print("sls:")
+            print(f"  project: {sls.project}")
+            print(f"  logstore: {sls.logstore}")
+            print(f"  endpoint: {sls.endpoint}")
         print()
         print("下一步:")
         print(f"  {script_name()} targets")
         print(f"  {script_name()} sync --target {args.target}")
     return 0
+
+
+def sls_config_from_init_args(args: argparse.Namespace) -> SlsConfig | None:
+    values = [args.sls_project, args.sls_logstore, args.sls_endpoint]
+    if not any(values):
+        return None
+    if not all(values):
+        raise UserFacingError(
+            "错误: SLS 配置不完整。\n\n"
+            "原因: --sls-project、--sls-logstore、--sls-endpoint 必须同时提供。\n\n"
+            "下一步:\n"
+            f"  {script_name()} init --target {args.target or '<target>'} --service <service> "
+            "--sls-project <project> --sls-logstore <logstore> --sls-endpoint <endpoint>"
+        )
+    return SlsConfig(project=str(args.sls_project), logstore=str(args.sls_logstore), endpoint=str(args.sls_endpoint))
+
+
+def replace_service_sls(service: ServiceConfig, sls: SlsConfig | None) -> ServiceConfig:
+    return ServiceConfig(name=service.name, region=service.region, pid=service.pid, app_id=service.app_id, sls=sls)
+
+
+def configure_service_sls_interactive(client: AliyunCliClient, service: ServiceConfig) -> ServiceConfig:
+    answer = _prompt(f"configure SLS for {service.name}? y/N", "N").strip().lower()
+    if not answer.startswith("y"):
+        return service
+
+    arms_sls = read_arms_sls_config(client, service)
+    if arms_sls:
+        print(f"ARMS 已有关联 SLS: project={arms_sls.project} logstore={arms_sls.logstore} endpoint={arms_sls.endpoint}")
+        use_arms = _prompt("use ARMS SLS config? Y/n", "Y").strip().lower()
+        if not use_arms.startswith("n"):
+            return replace_service_sls(service, arms_sls)
+
+    print(f"SLS 配置: {service.name}")
+    project = choose_sls_project_interactive(client)
+    if not project:
+        return service
+    endpoint_default = f"{service.region}.log.aliyuncs.com"
+    endpoint = _prompt("sls endpoint", endpoint_default)
+    logstore = choose_sls_logstore_interactive(client, project=project, endpoint=endpoint)
+    if not logstore:
+        return service
+    return replace_service_sls(service, SlsConfig(project=project, logstore=logstore, endpoint=endpoint))
+
+
+def read_arms_sls_config(client: AliyunCliClient, service: ServiceConfig) -> SlsConfig | None:
+    if not service.pid:
+        return None
+    try:
+        response = client.get_trace_app_config(pid=service.pid)
+    except Exception:
+        return None
+    return sls_config_from_arms_trace_app_config(response)
+
+
+def sls_config_from_arms_trace_app_config(response: dict[str, Any]) -> SlsConfig | None:
+    raw_data = response.get("Data") if isinstance(response, dict) else None
+    if isinstance(raw_data, str):
+        try:
+            raw_data = json.loads(raw_data)
+        except json.JSONDecodeError:
+            return None
+    settings: dict[str, Any] = {}
+    if isinstance(raw_data, dict):
+        settings.update(raw_data)
+        raw_settings = raw_data.get("Settings") or raw_data.get("settings")
+        if isinstance(raw_settings, list):
+            for item in raw_settings:
+                if not isinstance(item, dict):
+                    continue
+                key = item.get("Key") or item.get("key")
+                if key:
+                    settings[str(key)] = item.get("Value") if "Value" in item else item.get("value")
+    project = _optional_str(settings.get("profiler.SLS.project"))
+    logstore = _optional_str(settings.get("profiler.SLS.logStore") or settings.get("profiler.SLS.logstore"))
+    region = _optional_str(settings.get("profiler.SLS.regionId") or settings.get("profiler.SLS.region"))
+    if not project or not logstore or not region:
+        return None
+    return SlsConfig(project=project, logstore=logstore, endpoint=f"{region}.log.aliyuncs.com")
+
+
+def choose_sls_project_interactive(client: AliyunCliClient) -> str:
+    projects: list[str] = []
+    try:
+        projects = client.list_sls_projects()
+    except Exception as exc:
+        print(f"无法列出 SLS Project，将改为手动输入: {_truncate(_sanitize(str(exc)), 160)}")
+    if projects:
+        for index, project in enumerate(projects, 1):
+            print(f"{index}. {project}")
+        selected = _prompt("sls project index", "1")
+        try:
+            index = int(selected)
+        except ValueError:
+            index = 0
+        if 1 <= index <= len(projects):
+            return projects[index - 1]
+    return _prompt("sls project", "")
+
+
+def choose_sls_logstore_interactive(client: AliyunCliClient, *, project: str, endpoint: str) -> str:
+    logstores: list[str] = []
+    try:
+        logstores = client.list_sls_logstores(project=project, endpoint=endpoint)
+    except Exception as exc:
+        print(f"无法列出 SLS Logstore，将改为手动输入: {_truncate(_sanitize(str(exc)), 160)}")
+    if logstores:
+        for index, logstore in enumerate(logstores, 1):
+            print(f"{index}. {logstore}")
+        selected = _prompt("sls logstore index", "1")
+        try:
+            index = int(selected)
+        except ValueError:
+            index = 0
+        if 1 <= index <= len(logstores):
+            return logstores[index - 1]
+    return _prompt("sls logstore", "")
 
 
 def cmd_init_interactive(args: argparse.Namespace) -> int:
@@ -1711,11 +2065,12 @@ def cmd_init_interactive(args: argparse.Namespace) -> int:
             print("已取消")
             return 0
         replace = answer.startswith("r")
+    services = [configure_service_sls_interactive(client, app_to_service(app)) for app in selected]
     config.add_or_update_target(
         target_name=target_name,
         branch=branch or None,
         default_window=window,
-        services=[app_to_service(app) for app in selected],
+        services=services,
         replace=replace,
     )
     config.save(args.config)
@@ -1771,6 +2126,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
                         service=service_config,
                         start_ms=start_ms,
                         end_ms=end_ms,
+                        keep_old_data=args.keep_old_data,
                         operation_name=args.operation,
                         page_size=args.page_size,
                         max_pages=args.max_pages,
@@ -1787,6 +2143,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
 
     payload = {
         "range": {"start_ms": start_ms, "end_ms": end_ms, "start": format_epoch_ms(start_ms), "end": format_epoch_ms(end_ms)},
+        "fresh": not args.keep_old_data,
         "summaries": [sync_summary_to_dict(summary) for summary in summaries],
         "failures": [{"service": service.name, "error": error} for service, error in failures],
     }
@@ -1794,6 +2151,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
         print(_json(payload))
     else:
         print(f"range: {format_epoch_ms(start_ms)} -> {format_epoch_ms(end_ms)}")
+        print(f"fresh: {str(not args.keep_old_data).lower()}")
         for summary in summaries:
             print()
             print(f"service: {summary.service_name}")
@@ -1891,6 +2249,19 @@ def cmd_show(args: argparse.Namespace) -> int:
         sample_span = repository.get_span(group["sample_trace_id"], group["sample_span_id"])
     finally:
         repository.close()
+    if args.no_logs:
+        related_logs = {"status": "skipped", "queries": [], "message": "已按 --no-logs 跳过 SLS 关联日志查询。"}
+    else:
+        related_logs = build_related_logs_payload(
+            config=config,
+            occurrences=occurrences,
+            client=build_client(),
+            occurrence_limit=args.log_occurrences,
+            before_seconds=parse_optional_duration_seconds(args.log_before),
+            after_seconds=parse_optional_duration_seconds(args.log_after),
+            limit=args.log_limit,
+            raw_logs=args.raw_logs,
+        )
 
     if getattr(args, "json_output", False):
         payload = {
@@ -1899,6 +2270,7 @@ def cmd_show(args: argparse.Namespace) -> int:
             "events": [_event_row_to_payload(row, raw=args.raw_event) for row in events],
             "sample_event": _event_row_to_payload(sample_event, raw=args.raw_event) if sample_event else None,
             "sample_span": _span_row_to_payload(sample_span, raw=args.raw_span) if sample_span else None,
+            "related_logs": related_logs,
         }
         print(_json(payload))
         return 0
@@ -1964,7 +2336,217 @@ def cmd_show(args: argparse.Namespace) -> int:
         print()
         print("raw_span:")
         print(_json(json.loads(sample_span["raw_json"])))
+    print_related_logs(related_logs)
     return 0
+
+
+def cmd_logs(args: argparse.Namespace) -> int:
+    config = ProjectConfig.load(args.config)
+    repository = TraceRepository(args.db)
+    try:
+        if args.target or args.service:
+            target, services = resolve_scope(args, config, command_name="logs")
+            group = repository.get_group(
+                args.group_id,
+                target_name=target.name if target else None,
+                service_names=[service.name for service in services],
+            )
+            if not group:
+                raise UserFacingError(format_show_group_not_found(args.group_id, config, target=target, services=services))
+        else:
+            groups = repository.list_groups_by_key(args.group_id, limit=2)
+            if not groups:
+                raise UserFacingError(format_show_group_not_found(args.group_id, config))
+            if len(groups) > 1:
+                raise UserFacingError(format_show_group_ambiguous(args.group_id, groups))
+        occurrences = repository.list_group_occurrences(args.group_id, limit=args.occurrences)
+    finally:
+        repository.close()
+
+    related_logs = build_related_logs_payload(
+        config=config,
+        occurrences=occurrences,
+        client=build_client(),
+        occurrence_limit=args.occurrences,
+        before_seconds=parse_optional_duration_seconds(args.before),
+        after_seconds=parse_optional_duration_seconds(args.after),
+        limit=args.limit,
+        raw_logs=args.raw,
+    )
+    if getattr(args, "json_output", False):
+        print(_json({"group_id": args.group_id, "related_logs": related_logs}))
+    else:
+        print_related_logs(related_logs)
+    return 1 if related_logs.get("status") == "failed" else 0
+
+
+def build_related_logs_payload(
+    *,
+    config: ProjectConfig,
+    occurrences: Sequence[sqlite3.Row],
+    client: AliyunCliClient,
+    occurrence_limit: int = 1,
+    before_seconds: int | None = None,
+    after_seconds: int | None = None,
+    limit: int | None = None,
+    raw_logs: bool = False,
+) -> dict[str, Any]:
+    selected = list(occurrences[:occurrence_limit])
+    if not selected:
+        return {"status": "empty", "queries": [], "message": "没有可用于查询日志的 occurrence。"}
+
+    queries: list[dict[str, Any]] = []
+    seen_trace_ids: set[str] = set()
+    overall_status = "empty"
+    for row in selected:
+        trace_id = str(row["trace_id"] or "").strip()
+        if not trace_id or trace_id in seen_trace_ids:
+            continue
+        seen_trace_ids.add(trace_id)
+        _target, service = config.find_service(str(row["service_name"]))
+        sls = service.sls if service else None
+        if not sls:
+            queries.append(
+                {
+                    "status": "not_configured",
+                    "service_name": row["service_name"],
+                    "trace_id": trace_id,
+                    "message": "service 未配置 SLS，无法查询关联日志。",
+                }
+            )
+            if overall_status == "empty":
+                overall_status = "not_configured"
+            continue
+
+        timestamp_ms = row["timestamp_ms"] or 0
+        resolved_before = before_seconds if before_seconds is not None else sls.default_before_seconds
+        resolved_after = after_seconds if after_seconds is not None else sls.default_after_seconds
+        resolved_limit = limit if limit is not None else sls.default_limit
+        from_s = max(0, int((timestamp_ms - resolved_before * 1000) / 1000))
+        to_s = max(from_s + 1, int((timestamp_ms + resolved_after * 1000) / 1000))
+        query_payload: dict[str, Any] = {
+            "status": "empty",
+            "service_name": row["service_name"],
+            "trace_id": trace_id,
+            "project": sls.project,
+            "logstore": sls.logstore,
+            "endpoint": sls.endpoint,
+            "from": from_s,
+            "to": to_s,
+            "query": trace_id,
+            "limit": resolved_limit,
+            "items": [],
+        }
+        try:
+            response = client.get_sls_logs(
+                project=sls.project,
+                logstore=sls.logstore,
+                endpoint=sls.endpoint,
+                from_s=from_s,
+                to_s=to_s,
+                query=trace_id,
+                line=resolved_limit,
+                reverse=True,
+            )
+            items = normalize_sls_logs(response, raw=raw_logs)
+            query_payload["items"] = items
+            query_payload["status"] = "ok" if items else "empty"
+        except Exception as exc:
+            query_payload["status"] = "failed"
+            query_payload["error"] = _sanitize(str(exc))
+
+        if query_payload["status"] == "ok":
+            overall_status = "ok"
+        elif overall_status == "empty" and query_payload["status"] in {"failed", "not_configured"}:
+            overall_status = str(query_payload["status"])
+        queries.append(query_payload)
+
+    return {"status": overall_status, "queries": queries}
+
+
+def normalize_sls_logs(response: Any, *, raw: bool = False) -> list[dict[str, Any]]:
+    raw_items: Any = None
+    if isinstance(response, list):
+        raw_items = response
+    elif isinstance(response, dict):
+        for key in ("logs", "data", "LogList", "logList", "Logs"):
+            value = response.get(key)
+            if isinstance(value, list):
+                raw_items = value
+                break
+    if raw_items is None:
+        return []
+
+    items: list[dict[str, Any]] = []
+    for raw_item in raw_items:
+        if not isinstance(raw_item, dict):
+            continue
+        content = raw_item.get("content")
+        parsed_content: dict[str, Any] = {}
+        if isinstance(content, str):
+            try:
+                loaded = json.loads(content)
+                if isinstance(loaded, dict):
+                    parsed_content = loaded
+            except json.JSONDecodeError:
+                parsed_content = {"message": content}
+        elif isinstance(content, dict):
+            parsed_content = content
+        merged = {**raw_item, **parsed_content}
+        item = {
+            "time": _optional_int(merged.get("__time__") or merged.get("_time_") or merged.get("time")),
+            "source": _optional_str(merged.get("_source_") or merged.get("source") or merged.get("_source")),
+            "pod": _optional_str(merged.get("_pod_name_") or merged.get("_pod_name") or merged.get("pod_name")),
+            "level": _optional_str(merged.get("log.level") or merged.get("level")),
+            "message": _optional_str(merged.get("message") or merged.get("log.message")),
+            "log_original": _optional_str(merged.get("log.original")),
+            "request_id": _optional_str(merged.get("request_id") or merged.get("requestId")),
+            "trace_id": _optional_str(merged.get("trace_id") or merged.get("traceId") or merged.get("otelTraceID")),
+        }
+        if raw:
+            item["raw"] = raw_item
+        items.append(item)
+    return items
+
+
+def print_related_logs(payload: dict[str, Any]) -> None:
+    print()
+    print(f"related_logs: {payload['status']}")
+    for query in payload.get("queries", []):
+        print("query:")
+        if query.get("service_name"):
+            print(f"  service: {query['service_name']}")
+        if query.get("project"):
+            print(f"  project: {query['project']}")
+            print(f"  logstore: {query['logstore']}")
+            print(f"  endpoint: {query['endpoint']}")
+        print(f"  trace_id: {query.get('trace_id', '')}")
+        print(f"  query: {query.get('query', query.get('trace_id', ''))}")
+        if query.get("limit"):
+            print(f"  limit: {query['limit']}")
+        if query.get("message"):
+            print(f"  message: {query['message']}")
+        if query.get("error"):
+            print(f"  error: {_truncate(str(query['error']), 240)}")
+        items = query.get("items") or []
+        if items:
+            print("logs:")
+        for item in items:
+            parts = []
+            if item.get("time"):
+                parts.append(format_epoch_ms(int(item["time"]) * 1000))
+            if item.get("level"):
+                parts.append(f"level={item['level']}")
+            if item.get("source"):
+                parts.append(f"source={item['source']}")
+            if item.get("pod"):
+                parts.append(f"pod={item['pod']}")
+            message = item.get("message") or item.get("log_original") or ""
+            if message:
+                parts.append(f"message={_truncate(str(message), 240)}")
+            if item.get("log_original"):
+                parts.append(f"log_original={_truncate(str(item['log_original']), 240)}")
+            print(f"- {' '.join(parts)}")
 
 
 def format_show_group_not_found(
@@ -2532,6 +3114,12 @@ def parse_window(value: str) -> timedelta:
     if unit == "h":
         return timedelta(hours=amount)
     return timedelta(days=amount)
+
+
+def parse_optional_duration_seconds(value: str | None) -> int | None:
+    if not value:
+        return None
+    return int(parse_window(value).total_seconds())
 
 
 def parse_local_datetime(value: str, tz_name: str = DEFAULT_TZ) -> datetime:

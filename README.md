@@ -46,7 +46,7 @@ python3 skills/yunxiao-mr/scripts/cli.py label delete HAT-Ready
 
 一个用于排查阿里云 ARMS 异常调用链的 Agent skill。它会把异常 Span 拉到代码仓库本地，按错误指纹聚合，并给 Codex 或 Claude 提供可追溯的调试证据。
 
-线上异常不应该靠 ARMS 控制台截图传递。把这个 skill 安装到应用仓库，配置好对应环境的 ARMS service，Agent 就可以同步最近的异常 Span 到本地 SQLite，再基于异常组、堆栈和 trace/span 证据回到代码里排查。
+线上异常不应该靠 ARMS 控制台截图传递。把这个 skill 安装到应用仓库，配置好对应环境的 ARMS service，Agent 就可以同步最近的异常 Span 到本地 SQLite，再基于异常组、堆栈、trace/span 证据和可选 SLS 关联日志回到代码里排查。
 
 这个项目刻意保持简单：一个 skill，一个 Python CLI，不依赖阿里云 Python SDK，也不保存凭证。
 
@@ -76,9 +76,10 @@ python3 skills/arms-exceptions-explorer/scripts/cli.py init
 python3 skills/arms-exceptions-explorer/scripts/cli.py sync --target staging
 python3 skills/arms-exceptions-explorer/scripts/cli.py groups --target staging
 python3 skills/arms-exceptions-explorer/scripts/cli.py show <group_id>
+python3 skills/arms-exceptions-explorer/scripts/cli.py logs <group_id>
 ```
 
-执行后，Agent 会拿到限定范围内的异常组、样本堆栈、`trace_id`、`span_id`、必要时的原始事件 tags，以及足够回到代码排查的上下文。
+执行后，Agent 会拿到限定范围内的异常组、样本堆栈、`trace_id`、`span_id`、必要时的原始事件 tags。如果 service 配置了 SLS，`show` 会默认按 `trace_id` 全文查询关联日志；可以用 `--no-logs` 关闭。
 
 ### 为什么做这个
 
@@ -125,7 +126,8 @@ python3 skills/arms-exceptions-explorer/scripts/cli.py show <group_id> --raw-spa
 - 创建项目本地的 `.arms-exceptions/config.json`。
 - 先调用 `SearchTracesByPage --IsError true` 查询异常 Span。
 - 再调用 `GetTrace` 回填异常 trace/span 详情。
-- 把本地调查数据保存到 SQLite。
+- 可选按 `trace_id` 调用 `aliyun sls GetLogs` 查询关联日志。
+- 把本地调查数据保存到 SQLite；`sync` 默认先刷新当前 target/service 的旧异常数据，需要保留旧数据时加 `--keep-old-data`。
 - 按 service、异常类型、归一化错误信息和顶部栈帧聚合异常。
 - 在缺少授权、配置或范围时输出下一步命令。
 
@@ -144,6 +146,8 @@ aliyun configure switch --profile <profile>
 ```text
 .arms-exceptions/config.json
 ```
+
+SLS 配置只保存 `project`、`logstore`、`endpoint` 和默认查询窗口等非凭证信息。关联日志默认实时查询，不写入 SQLite；完整 raw log 只有显式使用 `--raw-logs` 或 `logs --raw --json` 时才输出。
 
 本地 trace 数据不要提交：
 

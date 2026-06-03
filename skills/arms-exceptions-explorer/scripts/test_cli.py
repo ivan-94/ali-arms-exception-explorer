@@ -12,8 +12,10 @@ from arms_exceptions import app
 
 
 class FakeClient:
-    def __init__(self) -> None:
+    def __init__(self, *, arms_sls_config=None) -> None:
         self.commands: list[str] = []
+        self.sls_queries: list[dict[str, object]] = []
+        self.arms_sls_config = arms_sls_config
 
     def is_installed(self) -> bool:
         return True
@@ -21,11 +23,47 @@ class FakeClient:
     def version(self) -> str:
         return "3.3.18"
 
+    def sls_available(self) -> bool:
+        return True
+
     def list_trace_apps(self, *, region: str, search=None, page_size=100, max_pages=20):
         return [
             app.AppInfo(name="ai-service-dev", region=region, pid="pid-1", app_id="app-1", app_type="TRACE"),
             app.AppInfo(name="ai-service-dev-celery-worker", region=region, pid="pid-2", app_id="app-2", app_type="TRACE"),
         ]
+
+    def search_error_traces_by_page(self, **kwargs):
+        return {"PageBean": {"Total": 0, "TraceInfos": []}}
+
+    def get_sls_logs(self, **kwargs):
+        self.sls_queries.append(kwargs)
+        return [
+            {
+                "__time__": 1780453500,
+                "_source_": "stderr",
+                "_pod_name_": "ai-service-dev-6f6d8d654c",
+                "content": json.dumps(
+                    {
+                        "log.level": "ERROR",
+                        "message": "bsasr_gpt_stream error: transcribe is empty",
+                        "log.original": "app_websocket_asr_gpt.py:275 in bsasr_gpt_stream",
+                        "trace_id": "trace-1",
+                        "request_id": "req-1",
+                    }
+                ),
+            }
+        ]
+
+    def list_sls_projects(self, *, size=100):
+        return ["ai-service-logs"]
+
+    def list_sls_logstores(self, *, project: str, endpoint: str, size=200):
+        return ["app-log"]
+
+    def get_trace_app_config(self, *, pid: str):
+        if self.arms_sls_config is None:
+            return {"Data": {}}
+        return {"Data": self.arms_sls_config}
 
 
 class CliTests(unittest.TestCase):
@@ -49,6 +87,25 @@ class CliTests(unittest.TestCase):
         )
         config.save(path)
 
+    def write_config_with_sls(self, path: Path) -> None:
+        config = app.ProjectConfig.empty()
+        config.add_or_update_target(
+            target_name="ai-service-dev",
+            branch="dev",
+            default_window="24h",
+            services=[
+                app.ServiceConfig(
+                    name="ai-service-dev-celery-worker",
+                    sls=app.SlsConfig(
+                        project="ai-service-logs",
+                        logstore="app-log",
+                        endpoint="cn-beijing.log.aliyuncs.com",
+                    ),
+                )
+            ],
+        )
+        config.save(path)
+
     def write_group(self, db_path: Path, group_id: str = "45d39c79b8f10f94") -> None:
         repository = app.TraceRepository(db_path)
         try:
@@ -60,6 +117,45 @@ class CliTests(unittest.TestCase):
                 values (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (group_id, "ai-service-dev", "ai-service-dev-celery-worker", "run/task", "ValueError", "boom", app._now()),
+            )
+            repository.commit()
+        finally:
+            repository.close()
+
+    def write_group_with_occurrence(self, db_path: Path, group_id: str = "45d39c79b8f10f94") -> None:
+        repository = app.TraceRepository(db_path)
+        try:
+            repository.conn.execute(
+                """
+                insert into error_groups (
+                    group_key, target_name, service_name, operation_name, exception_type, message,
+                    occurrence_count, first_seen_ms, last_seen_ms, sample_trace_id, sample_span_id, updated_at
+                )
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    group_id,
+                    "ai-service-dev",
+                    "ai-service-dev-celery-worker",
+                    "run/task",
+                    "ValueError",
+                    "boom",
+                    1,
+                    1780453500000,
+                    1780453500000,
+                    "trace-1",
+                    "span-1",
+                    app._now(),
+                ),
+            )
+            repository.conn.execute(
+                """
+                insert into error_occurrences (
+                    group_key, trace_id, span_id, event_index, timestamp_ms, target_name, service_name, operation_name
+                )
+                values (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (group_id, "trace-1", "span-1", -1, 1780453500000, "ai-service-dev", "ai-service-dev-celery-worker", "run/task"),
             )
             repository.commit()
         finally:
@@ -147,6 +243,59 @@ class CliTests(unittest.TestCase):
         self.assertIn("ai-service-dev-celery-worker", stderr)
         self.assertIn("下一步", stderr)
 
+    def test_sync_defaults_to_fresh_and_removes_old_groups(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / ".arms-exceptions" / "config.json"
+            db_path = Path(tmp) / ".arms-exceptions" / "data" / "exceptions.sqlite3"
+            self.write_config(config_path)
+            self.write_group(db_path, group_id="old-group")
+
+            with mock.patch.object(app, "build_client", return_value=FakeClient()):
+                code, stdout, stderr = self.run_main(
+                    ["--config", str(config_path), "--db", str(db_path), "sync", "--service", "ai-service-dev-celery-worker"]
+                )
+
+            repository = app.TraceRepository(db_path)
+            try:
+                groups = repository.list_groups(target_name="ai-service-dev", service_names=["ai-service-dev-celery-worker"])
+            finally:
+                repository.close()
+
+        self.assertEqual(code, 0, stderr)
+        self.assertIn("fresh: true", stdout)
+        self.assertEqual([row["group_key"] for row in groups], [])
+
+    def test_sync_keep_old_data_preserves_old_groups(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / ".arms-exceptions" / "config.json"
+            db_path = Path(tmp) / ".arms-exceptions" / "data" / "exceptions.sqlite3"
+            self.write_config(config_path)
+            self.write_group(db_path, group_id="old-group")
+
+            with mock.patch.object(app, "build_client", return_value=FakeClient()):
+                code, stdout, stderr = self.run_main(
+                    [
+                        "--config",
+                        str(config_path),
+                        "--db",
+                        str(db_path),
+                        "sync",
+                        "--service",
+                        "ai-service-dev-celery-worker",
+                        "--keep-old-data",
+                    ]
+                )
+
+            repository = app.TraceRepository(db_path)
+            try:
+                groups = repository.list_groups(target_name="ai-service-dev", service_names=["ai-service-dev-celery-worker"])
+            finally:
+                repository.close()
+
+        self.assertEqual(code, 0, stderr)
+        self.assertIn("fresh: false", stdout)
+        self.assertEqual([row["group_key"] for row in groups], ["old-group"])
+
     def test_show_uses_unique_group_id_without_scope(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / ".arms-exceptions" / "config.json"
@@ -162,6 +311,176 @@ class CliTests(unittest.TestCase):
         self.assertIn("group_id: 45d39c79b8f10f94", stdout)
         self.assertIn("target: ai-service-dev", stdout)
         self.assertIn("service: ai-service-dev-celery-worker", stdout)
+
+    def test_show_includes_related_sls_logs_when_configured(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / ".arms-exceptions" / "config.json"
+            db_path = Path(tmp) / ".arms-exceptions" / "data" / "exceptions.sqlite3"
+            self.write_config_with_sls(config_path)
+            self.write_group_with_occurrence(db_path)
+            fake_client = FakeClient()
+
+            with mock.patch.object(app, "build_client", return_value=fake_client):
+                code, stdout, stderr = self.run_main(
+                    ["--config", str(config_path), "--db", str(db_path), "show", "45d39c79b8f10f94"]
+                )
+
+        self.assertEqual(code, 0, stderr)
+        self.assertIn("related_logs: ok", stdout)
+        self.assertIn("project: ai-service-logs", stdout)
+        self.assertIn("query: trace-1", stdout)
+        self.assertIn("bsasr_gpt_stream error: transcribe is empty", stdout)
+        self.assertIn("log_original=app_websocket_asr_gpt.py:275 in bsasr_gpt_stream", stdout)
+        self.assertEqual(fake_client.sls_queries[0]["query"], "trace-1")
+        self.assertEqual(fake_client.sls_queries[0]["line"], 50)
+
+    def test_show_no_logs_skips_sls_query(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / ".arms-exceptions" / "config.json"
+            db_path = Path(tmp) / ".arms-exceptions" / "data" / "exceptions.sqlite3"
+            self.write_config_with_sls(config_path)
+            self.write_group_with_occurrence(db_path)
+            fake_client = FakeClient()
+
+            with mock.patch.object(app, "build_client", return_value=fake_client):
+                code, stdout, stderr = self.run_main(
+                    ["--config", str(config_path), "--db", str(db_path), "show", "45d39c79b8f10f94", "--no-logs"]
+                )
+
+        self.assertEqual(code, 0, stderr)
+        self.assertIn("related_logs: skipped", stdout)
+        self.assertEqual(fake_client.sls_queries, [])
+
+    def test_show_log_limit_overrides_service_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / ".arms-exceptions" / "config.json"
+            db_path = Path(tmp) / ".arms-exceptions" / "data" / "exceptions.sqlite3"
+            self.write_config_with_sls(config_path)
+            self.write_group_with_occurrence(db_path)
+            fake_client = FakeClient()
+
+            with mock.patch.object(app, "build_client", return_value=fake_client):
+                code, _stdout, stderr = self.run_main(
+                    [
+                        "--config",
+                        str(config_path),
+                        "--db",
+                        str(db_path),
+                        "show",
+                        "45d39c79b8f10f94",
+                        "--log-limit",
+                        "20",
+                    ]
+                )
+
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(fake_client.sls_queries[0]["line"], 20)
+
+    def test_logs_command_prints_related_sls_logs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / ".arms-exceptions" / "config.json"
+            db_path = Path(tmp) / ".arms-exceptions" / "data" / "exceptions.sqlite3"
+            self.write_config_with_sls(config_path)
+            self.write_group_with_occurrence(db_path)
+            fake_client = FakeClient()
+
+            with mock.patch.object(app, "build_client", return_value=fake_client):
+                code, stdout, stderr = self.run_main(
+                    ["--config", str(config_path), "--db", str(db_path), "logs", "45d39c79b8f10f94"]
+                )
+
+        self.assertEqual(code, 0, stderr)
+        self.assertIn("related_logs: ok", stdout)
+        self.assertIn("bsasr_gpt_stream error: transcribe is empty", stdout)
+        self.assertEqual(fake_client.sls_queries[0]["query"], "trace-1")
+
+    def test_logs_command_returns_one_when_sls_query_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / ".arms-exceptions" / "config.json"
+            db_path = Path(tmp) / ".arms-exceptions" / "data" / "exceptions.sqlite3"
+            self.write_config_with_sls(config_path)
+            self.write_group_with_occurrence(db_path)
+            fake_client = FakeClient()
+            fake_client.get_sls_logs = mock.Mock(side_effect=RuntimeError("ProjectNotExist: missing project"))  # type: ignore[method-assign]
+
+            with mock.patch.object(app, "build_client", return_value=fake_client):
+                code, stdout, stderr = self.run_main(
+                    ["--config", str(config_path), "--db", str(db_path), "logs", "45d39c79b8f10f94"]
+                )
+
+        self.assertEqual(code, 1)
+        self.assertEqual(stderr, "")
+        self.assertIn("related_logs: failed", stdout)
+        self.assertIn("ProjectNotExist", stdout)
+
+    def test_show_returns_zero_when_sls_query_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / ".arms-exceptions" / "config.json"
+            db_path = Path(tmp) / ".arms-exceptions" / "data" / "exceptions.sqlite3"
+            self.write_config_with_sls(config_path)
+            self.write_group_with_occurrence(db_path)
+            fake_client = FakeClient()
+            fake_client.get_sls_logs = mock.Mock(side_effect=RuntimeError("ProjectNotExist: missing project"))  # type: ignore[method-assign]
+
+            with mock.patch.object(app, "build_client", return_value=fake_client):
+                code, stdout, stderr = self.run_main(
+                    ["--config", str(config_path), "--db", str(db_path), "show", "45d39c79b8f10f94"]
+                )
+
+        self.assertEqual(code, 0, stderr)
+        self.assertIn("group_id: 45d39c79b8f10f94", stdout)
+        self.assertIn("related_logs: failed", stdout)
+
+    def test_show_reports_related_logs_not_configured(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / ".arms-exceptions" / "config.json"
+            db_path = Path(tmp) / ".arms-exceptions" / "data" / "exceptions.sqlite3"
+            self.write_config(config_path)
+            self.write_group_with_occurrence(db_path)
+
+            code, stdout, stderr = self.run_main(
+                ["--config", str(config_path), "--db", str(db_path), "show", "45d39c79b8f10f94"]
+            )
+
+        self.assertEqual(code, 0, stderr)
+        self.assertIn("related_logs: not_configured", stdout)
+        self.assertIn("service 未配置 SLS", stdout)
+
+    def test_show_json_includes_raw_logs_only_when_requested(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / ".arms-exceptions" / "config.json"
+            db_path = Path(tmp) / ".arms-exceptions" / "data" / "exceptions.sqlite3"
+            self.write_config_with_sls(config_path)
+            self.write_group_with_occurrence(db_path)
+
+            with mock.patch.object(app, "build_client", return_value=FakeClient()):
+                code, stdout, stderr = self.run_main(
+                    ["--config", str(config_path), "--db", str(db_path), "show", "45d39c79b8f10f94", "--json"]
+                )
+            compact_payload = json.loads(stdout)
+
+            with mock.patch.object(app, "build_client", return_value=FakeClient()):
+                raw_code, raw_stdout, raw_stderr = self.run_main(
+                    [
+                        "--config",
+                        str(config_path),
+                        "--db",
+                        str(db_path),
+                        "show",
+                        "45d39c79b8f10f94",
+                        "--json",
+                        "--raw-logs",
+                    ]
+                )
+            raw_payload = json.loads(raw_stdout)
+
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(raw_code, 0, raw_stderr)
+        compact_item = compact_payload["related_logs"]["queries"][0]["items"][0]
+        raw_item = raw_payload["related_logs"]["queries"][0]["items"][0]
+        self.assertNotIn("raw", compact_item)
+        self.assertIn("raw", raw_item)
+        self.assertEqual(raw_item["raw"]["_source_"], "stderr")
 
     def test_show_missing_group_without_scope_guides_sync_not_scope_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -206,6 +525,91 @@ class CliTests(unittest.TestCase):
         self.assertEqual(payload["targets"][0]["services"][0]["pid"], "pid-1")
         self.assertEqual(payload["targets"][0]["services"][1]["app_id"], "app-2")
 
+    def test_init_noninteractive_writes_sls_config_to_all_services(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / ".arms-exceptions" / "config.json"
+            with mock.patch.object(app, "build_client", return_value=FakeClient()):
+                code, _stdout, stderr = self.run_main(
+                    [
+                        "--config",
+                        str(config_path),
+                        "init",
+                        "--target",
+                        "ai-service-dev",
+                        "--service",
+                        "ai-service-dev",
+                        "--service",
+                        "ai-service-dev-celery-worker",
+                        "--sls-project",
+                        "ai-service-logs",
+                        "--sls-logstore",
+                        "app-log",
+                        "--sls-endpoint",
+                        "cn-beijing.log.aliyuncs.com",
+                    ]
+                )
+
+            payload = json.loads(config_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(code, 0, stderr)
+        for service in payload["targets"][0]["services"]:
+            self.assertEqual(
+                service["sls"],
+                {
+                    "project": "ai-service-logs",
+                    "logstore": "app-log",
+                    "endpoint": "cn-beijing.log.aliyuncs.com",
+                    "default_before_seconds": 120,
+                    "default_after_seconds": 120,
+                    "default_limit": 50,
+                },
+            )
+
+    def test_init_interactive_can_configure_sls_from_lists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / ".arms-exceptions" / "config.json"
+            answers = iter(["", "", "1", "", "", "", "y", "1", "", "1"])
+            with (
+                mock.patch.object(app, "build_client", return_value=FakeClient()),
+                mock.patch("builtins.input", side_effect=lambda _prompt: next(answers)),
+            ):
+                code, stdout, stderr = self.run_main(["--config", str(config_path), "init"])
+
+            payload = json.loads(config_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(code, 0, stderr)
+        self.assertIn("SLS", stdout)
+        self.assertEqual(payload["targets"][0]["services"][0]["sls"]["project"], "ai-service-logs")
+        self.assertEqual(payload["targets"][0]["services"][0]["sls"]["logstore"], "app-log")
+        self.assertEqual(payload["targets"][0]["services"][0]["sls"]["endpoint"], "cn-beijing.log.aliyuncs.com")
+
+    def test_init_interactive_can_import_existing_arms_sls_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / ".arms-exceptions" / "config.json"
+            answers = iter(["", "", "1", "", "", "", "y", ""])
+            fake_client = FakeClient(
+                arms_sls_config={
+                    "profiler.SLS.regionId": "cn-beijing",
+                    "profiler.SLS.project": "arms-project",
+                    "profiler.SLS.logStore": "arms-logstore",
+                    "profiler.SLS.index": "trace_id",
+                }
+            )
+            with (
+                mock.patch.object(app, "build_client", return_value=fake_client),
+                mock.patch("builtins.input", side_effect=lambda _prompt: next(answers)),
+            ):
+                code, stdout, stderr = self.run_main(["--config", str(config_path), "init"])
+
+            payload = json.loads(config_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(code, 0, stderr)
+        self.assertIn("ARMS", stdout)
+        self.assertEqual(payload["targets"][0]["services"][0]["sls"]["project"], "arms-project")
+        self.assertEqual(payload["targets"][0]["services"][0]["sls"]["logstore"], "arms-logstore")
+        self.assertEqual(payload["targets"][0]["services"][0]["sls"]["endpoint"], "cn-beijing.log.aliyuncs.com")
+        self.assertNotIn("arms_index", payload["targets"][0]["services"][0]["sls"])
+
     def test_doctor_without_config_is_not_ready_and_guides_init(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / ".arms-exceptions" / "config.json"
@@ -219,6 +623,8 @@ class CliTests(unittest.TestCase):
         self.assertIn("下一步", stdout)
         self.assertIn("init", stdout)
         self.assertIn("status: false", stdout)
+        self.assertIn("sls_api_available: true", stdout)
+        self.assertIn("sls_configured_services: 0", stdout)
 
     def test_next_steps_use_actual_script_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
