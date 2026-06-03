@@ -1027,6 +1027,7 @@ def add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="配置缓存路径")
     parser.add_argument("--remote", default=DEFAULT_REMOTE, help="Git remote 名称")
     parser.add_argument("--debug", action="store_true", help="输出脱敏调试信息")
+    parser.add_argument("--json", action="store_true", default=False, help="输出 JSON，可放在命令前或子命令参数里")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1039,7 +1040,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     doctor = subparsers.add_parser("doctor", help="检查本地配置和云效 API 权限")
     doctor.add_argument("--skip-api", action="store_true", help="跳过云效 API 调用")
-    doctor.add_argument("--json", action="store_true", help="输出结构化诊断结果，适合 Agent 解析")
+    doctor.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="输出结构化诊断结果，适合 Agent 解析")
     doctor.set_defaults(func=command_doctor)
 
     create = subparsers.add_parser("create", help="创建合并请求")
@@ -1052,7 +1053,7 @@ def build_parser() -> argparse.ArgumentParser:
     create.add_argument("--work-item-ids", help="关联工作项 ID，多个用逗号分隔")
     create.add_argument("--label", action="append", help="创建成功后关联类标，可重复")
     create.add_argument("--create-missing-label", action="store_true", help="类标不存在时自动创建")
-    create.add_argument("--json", action="store_true", help="输出 JSON")
+    create.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="输出 JSON")
     create.set_defaults(func=command_create)
 
     list_parser = subparsers.add_parser("list", help="列举合并请求")
@@ -1062,13 +1063,13 @@ def build_parser() -> argparse.ArgumentParser:
     list_parser.add_argument("--search", help="搜索关键词")
     list_parser.add_argument("--label", help="按类标名过滤")
     list_parser.add_argument("--limit", type=int, default=20)
-    list_parser.add_argument("--json", action="store_true")
+    list_parser.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     list_parser.set_defaults(func=command_list)
 
     view = subparsers.add_parser("view", help="查看合并请求详情")
     view.add_argument("local_id")
     view.add_argument("--comments", action="store_true", help="同时列举评论")
-    view.add_argument("--json", action="store_true")
+    view.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     view.set_defaults(func=command_view)
 
     edit = subparsers.add_parser("edit", help="更新合并请求")
@@ -1076,7 +1077,7 @@ def build_parser() -> argparse.ArgumentParser:
     edit.add_argument("--title")
     edit.add_argument("--body")
     edit.add_argument("--body-file")
-    edit.add_argument("--json", action="store_true")
+    edit.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     edit.set_defaults(func=command_edit)
 
     label = subparsers.add_parser("label", help="管理项目类标和 MR 类标")
@@ -1084,7 +1085,7 @@ def build_parser() -> argparse.ArgumentParser:
     label_list = label_sub.add_parser("list", help="列举项目类标")
     label_list.add_argument("--search")
     label_list.add_argument("--limit", type=int, default=100)
-    label_list.add_argument("--json", action="store_true")
+    label_list.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     label_list.set_defaults(func=command_label)
     label_create = label_sub.add_parser("create", help="创建项目级类标")
     label_create.add_argument("name", help="项目类标名称")
@@ -1094,39 +1095,39 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"云效允许的类标颜色，默认 {DEFAULT_LABEL_COLOR}",
     )
     label_create.add_argument("--description", help="项目类标描述")
-    label_create.add_argument("--json", action="store_true")
+    label_create.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     label_create.set_defaults(func=command_label)
     label_add = label_sub.add_parser("add", help="给 MR 添加类标")
     label_add.add_argument("local_id")
     label_add.add_argument("name")
     label_add.add_argument("--create-missing-label", action="store_true")
-    label_add.add_argument("--json", action="store_true")
+    label_add.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     label_add.set_defaults(func=command_label)
     label_remove = label_sub.add_parser("remove", help="移除 MR 类标")
     label_remove.add_argument("local_id")
     label_remove.add_argument("name")
-    label_remove.add_argument("--json", action="store_true")
+    label_remove.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     label_remove.set_defaults(func=command_label)
     label_delete = label_sub.add_parser("delete", help="删除项目级类标，验收清理临时类标时使用")
     label_delete.add_argument("name_or_id", help="项目类标名称或 ID；同名时请使用 ID")
-    label_delete.add_argument("--json", action="store_true")
+    label_delete.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     label_delete.set_defaults(func=command_label)
 
     comment = subparsers.add_parser("comment", help="创建 MR 评论")
     comment.add_argument("local_id")
     comment.add_argument("--body")
     comment.add_argument("--body-file")
-    comment.add_argument("--json", action="store_true")
+    comment.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     comment.set_defaults(func=command_comment)
 
     close = subparsers.add_parser("close", help="关闭 MR")
     close.add_argument("local_id")
-    close.add_argument("--json", action="store_true")
+    close.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     close.set_defaults(func=command_close)
 
     reopen = subparsers.add_parser("reopen", help="重开 MR")
     reopen.add_argument("local_id")
-    reopen.add_argument("--json", action="store_true")
+    reopen.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     reopen.set_defaults(func=command_reopen)
 
     merge = subparsers.add_parser("merge", help="合并 MR")
@@ -1134,7 +1135,7 @@ def build_parser() -> argparse.ArgumentParser:
     merge.add_argument("--method", choices=["no-fast-forward", "squash", "rebase", "ff-only"], default="squash")
     merge.add_argument("--delete-branch", action="store_true", help="合并成功后删除源分支；后续重复删除该分支会显示远端 ref 不存在")
     merge.add_argument("--force", action="store_true", help="跳过本地可见的冲突/卡点预检查")
-    merge.add_argument("--json", action="store_true")
+    merge.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     merge.set_defaults(func=command_merge)
 
     return parser

@@ -378,12 +378,13 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="本地 webhook 配置路径")
+    parser.add_argument("--json", action="store_true", default=False, help="输出 JSON，可放在命令前或子命令参数里")
     subparsers = parser.add_subparsers(dest="command")
 
     config = subparsers.add_parser("config", help="配置或查看飞书 Webhook")
     config.add_argument("--webhook-url", help="写入本地飞书机器人 Webhook")
     config.add_argument("--show", action="store_true", help="显示配置状态，不打印完整 webhook")
-    config.add_argument("--json", action="store_true", help="输出 JSON")
+    config.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="输出 JSON")
     config.set_defaults(func=command_config)
 
     send = subparsers.add_parser("send", help="发送飞书通知")
@@ -393,7 +394,7 @@ def build_parser() -> argparse.ArgumentParser:
     send.add_argument("--json-file", help="raw 格式 JSON payload 文件")
     send.add_argument("--format", choices=["text", "card", "raw"], default="card", help="消息格式")
     send.add_argument("--dry-run", action="store_true", help="只渲染和校验，不发送")
-    send.add_argument("--json", action="store_true", help="输出 JSON")
+    send.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="输出 JSON")
     send.set_defaults(func=command_send)
 
     return parser

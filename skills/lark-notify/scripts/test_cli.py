@@ -65,6 +65,23 @@ class ConfigTests(unittest.TestCase):
         self.assertNotIn("local-token-12345678", output)
         self.assertIn("loca...5678", output)
 
+    def test_top_level_json_config_show_outputs_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / ".arms-exceptions" / "lark-notify.local.json"
+            config_path.parent.mkdir()
+            config_path.write_text(json.dumps({"webhook_url": WEBHOOK_LOCAL}), encoding="utf-8")
+            stdout = StringIO()
+            with chdir(root), redirect_stdout(stdout):
+                exit_code = cli.main(["--json", "config", "--show"])
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertTrue(payload["configured"])
+        self.assertEqual(payload["source"], "local")
+        self.assertNotIn("local-token-12345678", stdout.getvalue())
+        self.assertIn("loca...5678", payload["webhook"])
+
     def test_env_fallback_works(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {cli.WEBHOOK_ENV: WEBHOOK_ENV}, clear=True):
             root = Path(tmp)

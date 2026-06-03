@@ -242,6 +242,32 @@ class CommandLogicTests(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["api"]["status"], "error")
 
+    def test_top_level_json_doctor_skip_api_outputs_json(self) -> None:
+        fake_context = type(
+            "FakeContext",
+            (),
+            {
+                "git_root": Path("/repo"),
+                "config_path": Path("/repo/.arms-exceptions/yunxiao.json"),
+                "domain": "codeup.aliyun.com",
+                "api_domain": "openapi-rdc.aliyuncs.com",
+                "organization_id": "org",
+                "repository_path": "org/group/repo",
+                "repository_identity": "org%2Fgroup%2Frepo",
+                "default_target_branch": "main",
+                "config": {},
+            },
+        )()
+        with patch.object(cli, "YunxiaoContext", return_value=fake_context):
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                exit_code = cli.main(["--json", "doctor", "--skip-api"])
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["api"]["status"], "skipped")
+
 
 class ClientRequestTests(unittest.TestCase):
     def make_client(self):
