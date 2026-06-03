@@ -37,6 +37,7 @@ python3 skills/arms-exceptions-explorer/scripts/cli.py targets --json
   source-manifest.md
   groups.json
   dedupe.json
+  post-diagnosis-dedupe.json
   existing-mrs.json
   subagents/
     diagnose-<stable-slug>.md
@@ -69,14 +70,15 @@ flowchart TD
   D --> E["groups 保存 groups.json"]
   E --> F["父 Agent 二次聚合 dedupe.json"]
   F --> G["Medium SubAgent 深度诊断"]
-  G --> H["Yunxiao MR 覆盖判断"]
-  H --> I["汇总 summary/source-manifest"]
-  I --> J{"status=bug 且未 covered?"}
-  J -- "yes" --> K["SubAgent(high) 执行 fix-arms-exception"]
-  J -- "no" --> L["跳过修复并记录原因"]
-  K --> M["清理 fix 子 Agent worktree"]
-  L --> N["lark-notify 发送报告"]
-  M --> N
+  G --> H["父 Agent 诊断后复聚合 post-diagnosis-dedupe.json"]
+  H --> I["Yunxiao MR 覆盖判断"]
+  I --> J["汇总 summary/source-manifest"]
+  J --> K{"status=bug 且未 covered?"}
+  K -- "yes" --> L["SubAgent(high) 执行 fix-arms-exception"]
+  K -- "no" --> M["跳过修复并记录原因"]
+  L --> N["清理 fix 子 Agent worktree"]
+  M --> O["lark-notify 发送报告"]
+  N --> O
 ```
 
 1. 解析 target/service，记录 target、services、branch、窗口。
@@ -86,15 +88,18 @@ flowchart TD
 
 5. 父 Agent 做二次聚合、去重和初筛，保存 `dedupe.json`。`group_id` 只作为本次运行内定位，不能作为跨运行强证据。
 6. 对保留的异常组调用 `show <group_id> --json` 获取详情，并派发 medium-effort Sub Agent 深度诊断。
-7. 使用 `yunxiao-mr list --state opened --json` 和必要的 merged/search 查询，判断是否已有 MR 覆盖。
-8. 汇总诊断结果到 `summary.md`。
-9. 对 `status=bug` 且未被强证据 MR 覆盖的项，派发 SubAgent(high) 执行 `fix-arms-exception`。
-10. 父 Agent 收集 fix 子 Agent 的 MR/失败结果后，清理对应 `.arms-exceptions/worktrees/fix-*` worktree，并在 `source-manifest.md` 记录清理结果；清理失败时保留路径和原因。
-11. 调用 `lark-notify send --title "ARMS 异常分诊: <target>" --body-file .arms-exceptions/triage/<run-id>/summary.md --format card` 发送报告。
+7. 父 Agent 收集所有诊断报告后必须做诊断后复聚合，保存 `post-diagnosis-dedupe.json`。复聚合要按根因、代码路径、异常指纹、修复建议和 Sub Agent 证据重新判断重复 bug，避免多个不同 `group_id` 或初筛代表组重复派发同一修复。
+8. 只有复聚合后的代表项进入 MR 覆盖判断。被合并的重复项必须记录代表项、被合并项、合并原因和对应诊断报告路径。
+9. 使用 `yunxiao-mr list --state opened --json` 和必要的 merged/search 查询，判断是否已有 MR 覆盖。
+10. 汇总诊断和复聚合结果到 `summary.md`。
+11. 对复聚合后的 `status=bug` 且未被强证据 MR 覆盖的代表项，派发 SubAgent(high) 执行 `fix-arms-exception`。
+12. 父 Agent 收集 fix 子 Agent 的 MR/失败结果后，清理对应 `.arms-exceptions/worktrees/fix-*` worktree，并在 `source-manifest.md` 记录清理结果；清理失败时保留路径和原因。
+13. 调用 `lark-notify send --title "ARMS 异常分诊: <target>" --body-file .arms-exceptions/triage/<run-id>/summary.md --format card` 发送报告。
 
 ## Rules
 
 - Sub Agent 并发不固定；父 Agent 自行决定并记录调度理由。
+- 不允许在诊断后复聚合完成前派发 `fix-arms-exception`；否则同一根因可能被多个 fix 子 Agent 重复修复。
 - fix 子 Agent 的 worktree 必须由父 Agent 在汇总后清理；不得清理用户当前工作区或非 `.arms-exceptions/worktrees/` 路径。
 - 详细异常内容可以写进报告和飞书通知，但永远不要包含凭证、Authorization header、AccessKey、Token、SecurityToken、签名 URL 或 OAuth code。
 - 默认面向 CI 自动完整执行；无法继续时写入 blocked/needs_human、发送通知并以失败状态退出。

@@ -1,347 +1,61 @@
-# Agent Skills for Ali Cloud Workflows
+# Ali ARMS Exception Agent Skills
 
 [![skills.sh](https://skills.sh/b/ivan-94/ali-arms-exception-explorer)](https://skills.sh/ivan-94/ali-arms-exception-explorer)
 
-这个仓库提供面向 Agent 的阿里云工作流 skills。
+这个仓库提供一组给 Agent 使用的阿里云工作流 skills。安装到宿主项目后，Agent 可以通过稳定的 skill 文档和随附 CLI 完成 ARMS 异常读取、分诊、修复、云效 MR 管理和飞书通知。
 
-当前包含：
+README 只保留人类需要知道的入口和边界；具体执行步骤在各 skill 的 `SKILL.md` 和 `references/` 中。
 
-- **ARMS Exceptions Explorer**：拉取、聚合并查看阿里云 ARMS 异常调用链 Span。
-- **Yunxiao MR**：在云效 Codeup 仓库创建、查看、更新、评论、打类标、关闭、重开和合并 MR。
-- **ARMS Exceptions Triage**：对一个 ARMS target/service 做二次聚合、去重、诊断、MR 关联和可选修复调度。
-- **Fix ARMS Exception**：从已确认 `status=bug` 的诊断报告出发，用 TDD 修复异常并创建云效 MR。
-- **Lark Notify**：通过飞书/Lark 自定义机器人 Webhook 发送分诊、修复和验收通知。
-- **Setup ARMS Workflow**：在宿主项目检查依赖、发现 ARMS/SLS 配置，并生成本地 setup 报告。
+## 安装
 
-## 工作流配置
-
-第一次在宿主项目接入完整 ARMS 异常工作流时安装：
+在需要接入的宿主项目根目录运行：
 
 ```bash
-for skill in setup-arms-workflow arms-exceptions-explorer arms-exceptions-triage fix-arms-exception yunxiao-mr lark-notify; do
-  npx skills@latest add ivan-94/ali-arms-exception-explorer --skill "$skill" -a codex
-done
+npx skills@latest add ivan-94/ali-arms-exception-explorer
 ```
 
-让 Agent 执行：
+安装后，把任务交给 Agent，例如：
 
 ```text
-使用 setup-arms-workflow 配置当前项目的 ARMS 异常分诊流程
+使用 setup-arms-workflow 配置当前项目的 ARMS 异常工作流
 ```
-
-`setup-arms-workflow` 会检查 `aliyun`、ARMS app、SLS project/logstore、云效 remote/token 和飞书 Webhook 配置，产物写到：
 
 ```text
-.arms-exceptions/setup/
+使用 arms-exceptions-triage 分诊 production 的 ARMS 异常
 ```
 
-它不会运行 ARMS sync、创建 MR/类标、发送真实飞书通知，也不会自动修改宿主 `AGENTS.md` 或 `CLAUDE.md`。
+## 包含的 Skills
 
-## ARMS 异常分诊和修复
-
-在需要完整处理 ARMS 异常的项目里安装相关 skills：
-
-```bash
-for skill in setup-arms-workflow arms-exceptions-explorer arms-exceptions-triage fix-arms-exception yunxiao-mr lark-notify; do
-  npx skills@latest add ivan-94/ali-arms-exception-explorer --skill "$skill" -a codex
-done
-```
-
-典型流程：
-
-```bash
-python3 skills/arms-exceptions-explorer/scripts/cli.py doctor
-python3 skills/arms-exceptions-explorer/scripts/cli.py targets --json
-python3 skills/arms-exceptions-explorer/scripts/cli.py sls projects --json
-python3 skills/lark-notify/scripts/cli.py config --show
-```
-
-让 Agent 执行：
-
-```text
-使用 arms-exceptions-triage 分诊 target production 的异常
-```
-
-`arms-exceptions-triage` 面向 CI/Agent 自动完整执行：默认会拉取、聚合、诊断、查 MR，并对未被已有 MR 覆盖的 `status=bug` 诊断报告派发 SubAgent(high) 调用 `fix-arms-exception`。只有调用方显式指定 triage-only/只分诊时，才跳过修复阶段。
-
-分诊产物保存在宿主项目本地：
-
-```text
-.arms-exceptions/triage/<run-id>/
-```
-
-这个目录必须忽略提交。完整流程见 **[skills/arms-exceptions-triage](./skills/arms-exceptions-triage/SKILL.md)** 和 **[skills/fix-arms-exception](./skills/fix-arms-exception/SKILL.md)**。
-
-## Lark Notify
-
-在需要把 Agent 结果发送到飞书群的项目里安装：
-
-```bash
-npx skills@latest add ivan-94/ali-arms-exception-explorer \
-  --skill lark-notify \
-  -a codex
-```
-
-保存飞书自定义机器人 Webhook：
-
-```bash
-python3 skills/lark-notify/scripts/cli.py config --webhook-url <webhook>
-```
-
-Webhook 读取优先级：
-
-1. `.arms-exceptions/lark-notify.local.json`
-2. `ARMS_LARK_WEBHOOK_URL`
-
-本地 Webhook 文件必须忽略提交。发送前建议先 dry-run：
-
-```bash
-python3 skills/lark-notify/scripts/cli.py send \
-  --title "ARMS 异常分诊" \
-  --body-file .arms-exceptions/triage/<run-id>/summary.md \
-  --format card \
-  --dry-run
-```
-
-完整说明见 **[skills/lark-notify](./skills/lark-notify/SKILL.md)**。
-
-## Yunxiao MR
-
-在需要管理云效 Codeup 合并请求的项目里安装 skill：
-
-```bash
-npx skills@latest add ivan-94/ali-arms-exception-explorer \
-  --skill yunxiao-mr \
-  -a codex
-```
-
-配置云效个人访问令牌：
-
-```bash
-export YUNXIAO_ACCESS_TOKEN=<personal_access_token>
-```
-
-让 Agent 执行云效 MR 流程，或手动运行：
-
-```bash
-python3 skills/yunxiao-mr/scripts/cli.py doctor --json
-python3 skills/yunxiao-mr/scripts/cli.py create --title "修复异常聚合" --body-file /tmp/mr.md --json
-python3 skills/yunxiao-mr/scripts/cli.py list --state opened
-python3 skills/yunxiao-mr/scripts/cli.py view <localId> --comments
-python3 skills/yunxiao-mr/scripts/cli.py label add <localId> HAT-Ready --create-missing-label
-python3 skills/yunxiao-mr/scripts/cli.py label delete HAT-Ready
-```
-
-第一次运行时，CLI 会从 Codeup Git remote 推断仓库信息，并把非凭证缓存写入 `.arms-exceptions/yunxiao.json`。标准 Codeup remote 会把 Git/页面域名 `codeup.aliyun.com` 和 OAPI 接入点 `openapi-rdc.aliyuncs.com` 分开缓存。凭证只从 `YUNXIAO_ACCESS_TOKEN` 读取，不写入仓库。
-
-`create --json` 顶层会输出 `localId`、`status`、`url`、`detailUrl`、`webUrl`，方便 Agent 直接拿到 MR ID 和详情页链接。项目级临时类标可以用 `label delete <name-or-id>` 清理。
-
-完整说明见 **[skills/yunxiao-mr](./skills/yunxiao-mr/SKILL.md)**。
-
-## ARMS Exceptions Explorer
-
-一个用于排查阿里云 ARMS 异常调用链的 Agent skill。它会把异常 Span 拉到代码仓库本地，按错误指纹聚合，并给 Codex 或 Claude 提供可追溯的调试证据。
-
-线上异常不应该靠 ARMS 控制台截图传递。把这个 skill 安装到应用仓库，配置好对应环境的 ARMS service，Agent 就可以同步最近的异常 Span 到本地 SQLite，再基于异常组、堆栈、trace/span 证据和可选 SLS 关联日志回到代码里排查。
-
-这个项目刻意保持简单：一个 skill，一个 Python CLI，不依赖阿里云 Python SDK，也不保存凭证。
-
-### 快速开始
-
-1. 在需要排查的项目里安装 skill：
-
-```bash
-npx skills@latest add ivan-94/ali-arms-exception-explorer \
-  --skill arms-exceptions-explorer \
-  -a codex
-```
-
-2. 确认本机阿里云 CLI 可用：
-
-```bash
-brew install aliyun-cli
-aliyun configure --mode OAuth
-```
-
-3. 让 Agent 执行 ARMS 调查流程，或手动运行：
-
-```bash
-python3 skills/arms-exceptions-explorer/scripts/cli.py doctor
-python3 skills/arms-exceptions-explorer/scripts/cli.py apps --region cn-beijing --search my-service
-python3 skills/arms-exceptions-explorer/scripts/cli.py sls projects --json
-python3 skills/arms-exceptions-explorer/scripts/cli.py init
-python3 skills/arms-exceptions-explorer/scripts/cli.py sync --target staging
-python3 skills/arms-exceptions-explorer/scripts/cli.py groups --target staging
-python3 skills/arms-exceptions-explorer/scripts/cli.py show <group_id>
-python3 skills/arms-exceptions-explorer/scripts/cli.py logs <group_id>
-```
-
-执行后，Agent 会拿到限定范围内的异常组、样本堆栈、`trace_id`、`span_id`、必要时的原始事件 tags。如果 service 配置了 SLS，`show` 会默认按 `trace_id` 全文查询关联日志；可以用 `--no-logs` 关闭。
-
-### 为什么做这个
-
-我做这个 skill，是为了修掉 Agent 排查 ARMS 服务时反复出现的三个问题。
-
-### #1：Agent 用不了你的 ARMS 截图
-
-**问题**：ARMS 里有很多有用的异常数据，但 Agent 经常只能看到截图、复制片段或二手摘要。这样会丢掉 trace ID、span ID、tags、栈帧和时间信息。
-
-**解决方式**：给 Agent 一个可以执行的读取路径：
-
-```bash
-python3 skills/arms-exceptions-explorer/scripts/cli.py show <group_id>
-```
-
-CLI 输出就是事实来源，不再依赖 UI 截图。
-
-### #2：环境和 worker 容易混在一起
-
-**问题**：一个代码仓库可能对应多个 ARMS service：Web 服务、worker、beat 进程、staging、production、test。如果 Agent 一次读完所有服务，很容易追错异常。
-
-**解决方式**：同步和聚合列表必须有明确范围。`sync`、`groups` 都要求传 `--target` 或 `--service`；`show` 可以直接用本地唯一的 `group_id`，无法唯一定位时再按错误提示补范围。
-
-```bash
-python3 skills/arms-exceptions-explorer/scripts/cli.py sync --target production
-python3 skills/arms-exceptions-explorer/scripts/cli.py sync --service api-worker
-python3 skills/arms-exceptions-explorer/scripts/cli.py show <group_id>
-```
-
-### #3：原始 trace 太吵
-
-**问题**：原始 trace 很大。大多数调试会话真正需要的是异常类型、错误信息、顶部业务栈帧、出现次数和少量 trace 证据。
-
-**解决方式**：skill 会在本地保存原始 span，但默认先展示聚合后的异常。需要深入时再打开原始数据：
-
-```bash
-python3 skills/arms-exceptions-explorer/scripts/cli.py show <group_id> --raw-event
-python3 skills/arms-exceptions-explorer/scripts/cli.py show <group_id> --raw-span --json
-```
-
-### 它会做什么
-
-- 发现当前 `aliyun` CLI 身份能看到的 ARMS TRACE 应用。
-- 创建项目本地的 `.arms-exceptions/config.json`。
-- 先调用 `SearchTracesByPage --IsError true` 查询异常 Span。
-- 再调用 `GetTrace` 回填异常 trace/span 详情。
-- 可选按 `trace_id` 调用 `aliyun sls GetLogs` 查询关联日志。
-- 把本地调查数据保存到 SQLite；`sync` 默认先刷新当前 target/service 的旧异常数据，需要保留旧数据时加 `--keep-old-data`。
-- 按 service、异常类型、归一化错误信息和顶部栈帧聚合异常。
-- 在缺少授权、配置或范围时输出下一步命令。
-
-### 安全模型
-
-这个工具把身份认证交给阿里云 CLI。
-
-它不会保存 `AccessKey`、`AccessKeySecret`、`SecurityToken`、OAuth code、签名 URL 或 profile，也不会替你传 `--profile`。如果需要切换身份，请先在 `aliyun` 里切换：
-
-```bash
-aliyun configure switch --profile <profile>
-```
-
-项目配置通常可以提交：
-
-```text
-.arms-exceptions/config.json
-```
-
-SLS 配置只保存 `project`、`logstore`、`endpoint` 和默认查询窗口等非凭证信息。关联日志默认实时查询，不写入 SQLite；完整 raw log 只有显式使用 `--raw-logs` 或 `logs --raw --json` 时才输出。
-
-本地 trace 数据不要提交：
-
-```text
-.arms-exceptions/data/
-.arms-exceptions/setup/
-.arms-exceptions/triage/
-.arms-exceptions/worktrees/
-.arms-exceptions/lark-notify.local.json
-```
-
-### 参考
-
-### Skill
-
-- **[arms-exceptions-explorer](./skills/arms-exceptions-explorer/SKILL.md)** - 从宿主项目拉取、聚合并查看阿里云 ARMS 异常 Span。
-- **[arms-exceptions-triage](./skills/arms-exceptions-triage/SKILL.md)** - 分诊一个 ARMS target/service 的异常。
-- **[fix-arms-exception](./skills/fix-arms-exception/SKILL.md)** - 修复已确认可修的 ARMS 异常。
-- **[yunxiao-mr](./skills/yunxiao-mr/SKILL.md)** - 管理云效 Codeup 合并请求。
-- **[lark-notify](./skills/lark-notify/SKILL.md)** - 通过飞书/Lark 自定义机器人 Webhook 发送通知。
-- **[setup-arms-workflow](./skills/setup-arms-workflow/SKILL.md)** - 配置宿主项目的完整 ARMS 异常工作流。
-
-### CLI
-
-完整 CLI 文档见 **[skills/arms-exceptions-explorer/references/cli.md](./skills/arms-exceptions-explorer/references/cli.md)**。
-
-| 命令 | 用途 |
+| Skill | 用途 |
 | --- | --- |
-| `doctor` | 检查本地 `aliyun` CLI 和 ARMS API 访问。 |
-| `apps` | 列出当前身份可见的 ARMS TRACE 应用。 |
-| `sls` | 列出当前身份可见的 SLS Project 和指定 Project 下的 Logstore。 |
-| `init` | 创建或更新 `.arms-exceptions/config.json`。 |
-| `targets` | 查看已配置的 target 和 service。 |
-| `sync` | 为一个 target 或 service 拉取最近的异常 Span。 |
-| `groups` | 从本地数据库列出异常聚合组。 |
-| `show` | 查看一个异常组的样本堆栈、occurrence 和原始数据。 |
-| `logs` | 只查看一个异常组的 SLS 关联日志。 |
+| [`setup-arms-workflow`](./skills/setup-arms-workflow/SKILL.md) | 在宿主项目检查依赖、发现 ARMS/SLS/Yunxiao/Lark 配置，并生成本地 setup 报告。 |
+| [`arms-exceptions-explorer`](./skills/arms-exceptions-explorer/SKILL.md) | 从宿主项目拉取、聚合并查看阿里云 ARMS 异常 Span，为 Agent 提供可追溯的异常证据。 |
+| [`arms-exceptions-triage`](./skills/arms-exceptions-triage/SKILL.md) | 针对一个 ARMS target/service 自动分诊异常，去重诊断、关联云效 MR，并在明确是 bug 时调度修复。 |
+| [`fix-arms-exception`](./skills/fix-arms-exception/SKILL.md) | 从 `status=bug` 的诊断报告出发，在独立 worktree 中 TDD 修复异常，并创建云效 MR。 |
+| [`yunxiao-mr`](./skills/yunxiao-mr/SKILL.md) | 管理云效 Codeup 合并请求，包括创建、列举、查看、更新、评论、类标、关闭、重开和合并。 |
+| [`lark-notify`](./skills/lark-notify/SKILL.md) | 通过飞书/Lark 自定义机器人 Webhook 发送 Agent 通知，例如分诊报告、修复结果和 MR 链接。 |
 
-<details>
-<summary>项目配置示例</summary>
+## 人类需要知道的边界
 
-```json
-{
-  "version": 1,
-  "default_window": "24h",
-  "targets": [
-    {
-      "name": "staging",
-      "branch": "main",
-      "default_window": "24h",
-      "services": [
-        {
-          "name": "my-service-staging",
-          "region": "cn-beijing",
-          "pid": "hdt8ujazrm@...",
-          "app_id": "7041129"
-        },
-        {
-          "name": "my-service-staging-worker",
-          "region": "cn-beijing",
-          "pid": "hdt8ujazrm@...",
-          "app_id": "7062380"
-        }
-      ]
-    }
-  ]
-}
-```
+- 这个仓库是 skill 源项目；日常使用时应安装到具体宿主项目，再让 Agent 在宿主项目里执行。
+- 凭证交给宿主环境或官方工具处理：阿里云走 `aliyun` CLI 默认凭证链，云效走 `YUNXIAO_ACCESS_TOKEN`，飞书 Webhook 保存在本地忽略文件或环境变量中。
+- 不要提交本地调查数据、setup 报告、triage 产物、worktree、缓存、SQLite 数据库或 Webhook 文件。
+- `fix-arms-exception` 可以创建修复分支和云效 MR，但不会自动合并 MR。
+- 真实 ARMS、云效或飞书操作需要宿主项目已有权限和用户明确授权。
 
-</details>
+## 维护
 
-## 开发
+本仓库里的文档和 CLI 主要面向 Agent。新增或修改 skill 行为时，请同步检查：
 
-运行测试：
+- `README.md`
+- `skills/<skill-name>/SKILL.md`
+- `skills/<skill-name>/references/`
+- `skills/<skill-name>/scripts/test_*.py`
+
+默认本地测试：
 
 ```bash
 python3 -m unittest discover -s skills/arms-exceptions-explorer/scripts -p 'test_*.py'
 python3 -m unittest discover -s skills/yunxiao-mr/scripts -p 'test_*.py'
 python3 -m unittest discover -s skills/lark-notify/scripts -p 'test_*.py'
-```
-
-运行不调用 ARMS 的本地 smoke test：
-
-```bash
-python3 skills/arms-exceptions-explorer/scripts/cli.py doctor --skip-api
-python3 skills/arms-exceptions-explorer/scripts/cli.py --help
-python3 skills/arms-exceptions-explorer/scripts/cli.py show --help
-python3 skills/arms-exceptions-explorer/scripts/cli.py sls projects --help
-python3 skills/yunxiao-mr/scripts/cli.py doctor --json --skip-api
-python3 skills/yunxiao-mr/scripts/cli.py label delete --help
-python3 skills/lark-notify/scripts/cli.py config --show
-python3 skills/lark-notify/scripts/cli.py send --title "测试通知" --body "hello" --format card --dry-run
-```
-
-运行真实 ARMS smoke test：
-
-```bash
-python3 skills/arms-exceptions-explorer/scripts/cli.py doctor
-python3 skills/arms-exceptions-explorer/scripts/cli.py apps --region cn-beijing --search my-service
 ```

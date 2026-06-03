@@ -76,6 +76,15 @@ confidence: high | medium | low
 
 ## 二次聚合建议
 
+父 Agent 需要做两次聚合：
+
+1. `dedupe.json`：在 Sub Agent 深度诊断前，基于 ARMS group、stack、message 和日志信号做初筛。
+2. `post-diagnosis-dedupe.json`：在所有探索/诊断 Sub Agent 完成后，基于诊断报告中的根因、代码路径、修复建议和证据做复聚合。
+
+只有 `post-diagnosis-dedupe.json` 中的代表项可以进入 MR 覆盖判断和修复派发。
+
+### 初筛聚合
+
 父 Agent 在 `dedupe.json` 中记录：
 
 - 本次运行内的原始 `group_id` 列表；
@@ -93,6 +102,62 @@ confidence: high | medium | low
 - 附近 stack frame；
 - occurrence pattern；
 - 关联日志中的稳定根因信号。
+
+初筛聚合只负责减少需要深度诊断的候选项；不要因为初筛没有合并，就认为后续一定是不同 bug。
+
+### 诊断后复聚合
+
+所有 Sub Agent 诊断报告返回后，父 Agent 必须重新检查是否存在重复 bug，并写入：
+
+```text
+.arms-exceptions/triage/<run-id>/post-diagnosis-dedupe.json
+```
+
+复聚合记录建议包含：
+
+- 代表项 ID；
+- 合并进代表项的 `group_id` / `dedupe` 项；
+- 对应诊断报告路径；
+- 诊断结论 `status` 和 `confidence`；
+- 共同根因；
+- 共同代码路径；
+- 共同修复范围；
+- 合并原因；
+- 是否进入 MR 覆盖判断；
+- 是否进入 `fix-arms-exception`。
+
+复聚合比较维度：
+
+- Sub Agent 给出的 root cause 是否相同或共享同一上游原因；
+- 稳定代码路径、函数、模块或配置项是否相同；
+- 建议修复范围是否会同时覆盖多个异常；
+- 异常类型、normalized message 和 top business frame 是否只是同一问题的不同表现；
+- service / operation 差异是否来自同一调用链、同一 worker 入口或同一共享库；
+- 日志、trace、请求参数或外部依赖证据是否指向同一失败条件；
+- 一个修复是否会自然消除多个诊断项。
+
+必须合并的典型情况：
+
+- 多个 `group_id` 指向同一个业务函数里的同一空值、类型、边界或配置问题；
+- Web 和 worker 暴露不同异常形态，但根因是同一个共享库缺陷；
+- 不同 message 包含不同参数值，归一化后代码路径和失败条件相同；
+- 一个异常是另一个异常的后续效应，修复上游根因即可覆盖下游报错；
+- 多个 Sub Agent 分别提出相同修复文件和相同测试方向。
+
+不能合并的典型情况：
+
+- message 相似但代码路径、根因或修复范围不同；
+- 同一文件里存在两个独立 bug，需要不同测试和不同修复；
+- 一个是当前仓库可修 bug，另一个是上游、数据或发布状态问题；
+- 只有 `group_id`、service 名称或模糊标题相似，缺少共同根因证据。
+
+复聚合后：
+
+- 被合并项不再独立进入 MR 覆盖判断；
+- 被合并项不再独立派发 `fix-arms-exception`；
+- 代表项的 MR 覆盖判断必须把所有被合并项的异常指纹和诊断报告作为辅助证据；
+- `summary.md` 必须展示复聚合前后数量、代表项和被合并重复项；
+- `source-manifest.md` 必须记录读取的诊断报告、合并决策和未合并原因。
 
 噪音示例：
 
