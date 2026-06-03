@@ -28,15 +28,17 @@ export YUNXIAO_ACCESS_TOKEN=<personal_access_token>
 让 Agent 执行云效 MR 流程，或手动运行：
 
 ```bash
-python3 skills/yunxiao-mr/scripts/cli.py doctor
-python3 skills/yunxiao-mr/scripts/cli.py create --title "修复异常聚合" --body-file /tmp/mr.md
+python3 skills/yunxiao-mr/scripts/cli.py doctor --json
+python3 skills/yunxiao-mr/scripts/cli.py create --title "修复异常聚合" --body-file /tmp/mr.md --json
 python3 skills/yunxiao-mr/scripts/cli.py list --state opened
 python3 skills/yunxiao-mr/scripts/cli.py view <localId> --comments
 python3 skills/yunxiao-mr/scripts/cli.py label add <localId> HAT-Ready --create-missing-label
 python3 skills/yunxiao-mr/scripts/cli.py label delete HAT-Ready
 ```
 
-第一次运行时，CLI 会从 Codeup Git remote 推断仓库信息，并把非凭证缓存写入 `.arms-exceptions/yunxiao.json`。凭证只从 `YUNXIAO_ACCESS_TOKEN` 读取，不写入仓库。
+第一次运行时，CLI 会从 Codeup Git remote 推断仓库信息，并把非凭证缓存写入 `.arms-exceptions/yunxiao.json`。标准 Codeup remote 会把 Git/页面域名 `codeup.aliyun.com` 和 OAPI 接入点 `openapi-rdc.aliyuncs.com` 分开缓存。凭证只从 `YUNXIAO_ACCESS_TOKEN` 读取，不写入仓库。
+
+`create --json` 顶层会输出 `localId`、`status`、`url`、`detailUrl`、`webUrl`，方便 Agent 直接拿到 MR ID 和详情页链接。项目级临时类标可以用 `label delete <name-or-id>` 清理。
 
 完整说明见 **[skills/yunxiao-mr](./skills/yunxiao-mr/SKILL.md)**。
 
