@@ -77,6 +77,17 @@
 
 ## 风险与后续
 
-- 项目类标创建能力已验收通过，但当前 CLI 没有删除项目类标命令，因此临时类标 `codex-yunxiao-20260603105701` 会保留在测试仓库中。
+- 项目类标创建能力已验收通过。后续易用性修复已新增 `label delete <name-or-id>`，并已删除临时类标 `codex-yunxiao-20260603105701`。
 - MR 已合并到临时 base 分支，随后临时 base 分支已删除；不会影响测试仓库默认分支。
 - 验收过程未把 token 写入配置、报告或仓库文件。
+
+## 后续易用性修复记录
+
+- 已新增 `doctor --json`，缺 token 或 API 失败时也输出结构化结果。
+- 已让 MR URL 输出优先使用 `detailUrl`，避免把仓库首页误当 MR 链接。
+- 已让 `create --json` 顶层输出 `localId`、`status`、`url`、`detailUrl`、`webUrl` 快捷字段。
+- 已新增 `label delete <name-or-id>`，用于清理项目级临时类标。
+- 已真实执行 `label delete codex-yunxiao-20260603105701 --json`，返回 `result: true`；随后 `label list --search codex-yunxiao-20260603105701 --json` 返回空列表。
+- 已增强 `merge --delete-branch` help，说明合并后会删除源分支。
+- 已增强 403 错误提示，区分“读接口可用但写接口缺权限”的常见场景。
+- 已更新 `acceptance.sh`，使用唯一临时类标并在 smoke 验收后清理类标和临时分支。

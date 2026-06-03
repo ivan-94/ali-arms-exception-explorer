@@ -26,6 +26,7 @@ python3 skills/yunxiao-mr/scripts/cli.py <command>
 | 更新标题/描述 | `edit <localId> --title ... --body-file ...` |
 | 列举项目类标 | `label list` |
 | 创建项目类标 | `label create <name>` |
+| 删除项目类标 | `label delete <name-or-id>` |
 | 给 MR 加类标 | `label add <localId> <name>` |
 | 移除 MR 类标 | `label remove <localId> <name>` |
 | 评论 MR | `comment <localId> --body-file ...` |
@@ -46,6 +47,7 @@ python3 skills/yunxiao-mr/scripts/cli.py doctor
 
 ```bash
 python3 skills/yunxiao-mr/scripts/cli.py doctor --skip-api
+python3 skills/yunxiao-mr/scripts/cli.py doctor --json
 ```
 
 ### 鉴权
@@ -96,6 +98,12 @@ export YUNXIAO_ACCESS_TOKEN=<personal_access_token>
    python3 skills/yunxiao-mr/scripts/cli.py label add <localId> HAT-Ready --create-missing-label
    ```
 
+   临时验收类标或错误创建的项目类标可以删除：
+
+   ```bash
+   python3 skills/yunxiao-mr/scripts/cli.py label delete HAT-Ready
+   ```
+
 5. 后续状态同步：
 
    ```bash
@@ -109,7 +117,8 @@ export YUNXIAO_ACCESS_TOKEN=<personal_access_token>
 - 不自动 push 分支；只在未 push 时给出 `git push -u origin <branch>`。
 - 不自动合并；只有用户明确要求或执行 `merge` 时才合并。
 - `label add` 和 `label remove` 必须先读取现有 MR 类标，再重写完整类标列表，避免覆盖掉无关类标。
-- `--json` 用于下游工具或后续分析需要结构化数据时。
+- `--json` 用于下游工具或后续分析需要结构化数据时；`create --json` 顶层会给出 `localId`、`status`、`url`、`detailUrl`、`webUrl` 快捷字段。
+- URL 展示优先使用 MR 详情页 `detailUrl`，避免把仓库首页误当 MR 链接。
 - 遇到 API 失败时，先按 CLI 输出中的下一步处理，不要猜测 token 或仓库 ID。
 - `.arms-exceptions/yunxiao.json` 只保存非凭证字段。
 

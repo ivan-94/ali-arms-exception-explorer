@@ -29,7 +29,10 @@ export YUNXIAO_ACCESS_TOKEN=<personal_access_token>
 ```bash
 python3 skills/yunxiao-mr/scripts/cli.py doctor
 python3 skills/yunxiao-mr/scripts/cli.py doctor --skip-api
+python3 skills/yunxiao-mr/scripts/cli.py doctor --json
 ```
+
+`doctor --json` 输出 `ok`、仓库缓存字段和 `api.status`，缺 token 或 API 失败时也保持 JSON，便于 Agent 解析。
 
 ### create
 
@@ -50,6 +53,14 @@ python3 skills/yunxiao-mr/scripts/cli.py create \
 - `--label <name>`：可重复。
 - `--create-missing-label`：缺少类标时自动创建。
 - `--json`：输出 JSON。
+
+`create --json` 保留完整 `merge_request`，并在顶层额外输出：
+
+- `localId`
+- `status`
+- `url`：优先 MR 详情页 `detailUrl`
+- `detailUrl`
+- `webUrl`
 
 ### list
 
@@ -88,11 +99,14 @@ python3 skills/yunxiao-mr/scripts/cli.py label list
 python3 skills/yunxiao-mr/scripts/cli.py label create HAT-Ready --color "#3BA630"
 python3 skills/yunxiao-mr/scripts/cli.py label add 12 HAT-Ready --create-missing-label
 python3 skills/yunxiao-mr/scripts/cli.py label remove 12 HAT-Ready
+python3 skills/yunxiao-mr/scripts/cli.py label delete HAT-Ready
 ```
 
 `label add` 默认不创建缺失类标。需要创建时显式加 `--create-missing-label`。
 
-`label create` 的 `--color` 默认是 `#3BA630`，因为云效创建类标接口要求使用云效允许的固定颜色值。
+`label create` 创建项目级类标，`--color` 默认是 `#3BA630`，因为云效创建类标接口要求使用云效允许的固定颜色值。
+
+`label delete <name-or-id>` 删除项目级类标。若存在同名类标，CLI 会要求改用类标 ID。
 
 ### comment
 
@@ -112,6 +126,8 @@ python3 skills/yunxiao-mr/scripts/cli.py reopen 12
 ```bash
 python3 skills/yunxiao-mr/scripts/cli.py merge 12 --method squash --delete-branch
 ```
+
+`--delete-branch` 会在合并成功后删除源分支。后续清理脚本若再次删除同名远端分支，看到 `remote ref does not exist` 应视为已清理。
 
 合并方法：
 
@@ -146,7 +162,9 @@ python3 /Users/ivan/workspace/ai/arms-exceptions/skills/yunxiao-mr/scripts/cli.p
 创建不合并的 smoke MR：
 
 ```bash
-branch="codex-yunxiao-mr-smoke-$(date +%Y%m%d%H%M%S)"
+stamp="$(date +%Y%m%d%H%M%S)"
+branch="codex-yunxiao-mr-smoke-$stamp"
+label="codex-smoke-$stamp"
 git checkout -b "$branch"
 printf "codex smoke %s\n" "$branch" > codex-yunxiao-mr-smoke.txt
 git add codex-yunxiao-mr-smoke.txt
@@ -155,7 +173,7 @@ git push -u origin "$branch"
 python3 /Users/ivan/workspace/ai/arms-exceptions/skills/yunxiao-mr/scripts/cli.py create \
   --title "Codex Yunxiao MR smoke $branch" \
   --body "Automated acceptance test for yunxiao-mr skill." \
-  --label codex-smoke \
+  --label "$label" \
   --create-missing-label
 ```
 

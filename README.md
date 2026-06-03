@@ -33,6 +33,7 @@ python3 skills/yunxiao-mr/scripts/cli.py create --title "修复异常聚合" --b
 python3 skills/yunxiao-mr/scripts/cli.py list --state opened
 python3 skills/yunxiao-mr/scripts/cli.py view <localId> --comments
 python3 skills/yunxiao-mr/scripts/cli.py label add <localId> HAT-Ready --create-missing-label
+python3 skills/yunxiao-mr/scripts/cli.py label delete HAT-Ready
 ```
 
 第一次运行时，CLI 会从 Codeup Git remote 推断仓库信息，并把非凭证缓存写入 `.arms-exceptions/yunxiao.json`。凭证只从 `YUNXIAO_ACCESS_TOKEN` 读取，不写入仓库。

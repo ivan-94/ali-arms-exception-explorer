@@ -13,8 +13,9 @@ Runs the real Yunxiao MR acceptance path against:
   git@codeup.aliyun.com:685a564391483e233edca392/sharge-web/test.git
 
 Default mode clones the repo and runs doctor only.
---create-smoke-mr creates a throwaway branch, opens a smoke MR, labels it,
-comments on it, closes it, and reopens it. It does not merge.
+--create-smoke-mr creates a throwaway branch and label, opens a smoke MR,
+labels it, comments on it, closes it, reopens it, then removes the throwaway
+label and branch. It does not merge.
 USAGE
 }
 
@@ -59,7 +60,9 @@ fi
 git config user.email "codex@example.com"
 git config user.name "Codex"
 
-branch="codex-yunxiao-mr-smoke-$(date +%Y%m%d%H%M%S)"
+stamp="$(date +%Y%m%d%H%M%S)"
+branch="codex-yunxiao-mr-smoke-$stamp"
+label="codex-smoke-$stamp"
 git checkout -b "$branch"
 printf "codex smoke %s\n" "$branch" > codex-yunxiao-mr-smoke.txt
 git add codex-yunxiao-mr-smoke.txt
@@ -69,17 +72,24 @@ git push -u origin "$branch"
 create_json="$(python3 "$CLI_PATH" create \
   --title "Codex Yunxiao MR smoke $branch" \
   --body "Automated acceptance test for yunxiao-mr skill." \
-  --label codex-smoke \
+  --label "$label" \
   --create-missing-label \
   --json)"
 
-local_id="$(printf '%s\n' "$create_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["merge_request"]["localId"])')"
+local_id="$(printf '%s\n' "$create_json" | python3 -c 'import json,sys; data=json.load(sys.stdin); print(data.get("localId") or data["merge_request"]["localId"])')"
 
 python3 "$CLI_PATH" list --search "$branch"
 python3 "$CLI_PATH" view "$local_id" --comments
-python3 "$CLI_PATH" label remove "$local_id" codex-smoke
+python3 "$CLI_PATH" label remove "$local_id" "$label"
 python3 "$CLI_PATH" comment "$local_id" --body "Smoke test comment."
 python3 "$CLI_PATH" close "$local_id"
 python3 "$CLI_PATH" reopen "$local_id"
+python3 "$CLI_PATH" label delete "$label"
+
+if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+  git push origin --delete "$branch"
+else
+  echo "Remote branch already absent: $branch"
+fi
 
 echo "Smoke MR localId: $local_id"

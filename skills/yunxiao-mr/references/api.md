@@ -29,6 +29,7 @@
 | 合并 MR | `POST` | `/oapi/v1/codeup/organizations/{organizationId}/repositories/{repositoryId}/changeRequests/{localId}/merge` |
 | 列举项目类标 | `GET` | `/oapi/v1/codeup/organizations/{organizationId}/repositories/{repositoryId}/labels` |
 | 创建项目类标 | `POST` | `/oapi/v1/codeup/organizations/{organizationId}/repositories/{repositoryId}/labels` |
+| 删除项目类标 | `DELETE` | `/oapi/v1/codeup/organizations/{organizationId}/repositories/{repositoryId}/labels/{labelId}` |
 | 列举 MR 类标 | `GET` | `/oapi/v1/codeup/organizations/{organizationId}/repositories/{repositoryId}/changeRequests/{localId}/labels` |
 | 关联 MR 类标 | `POST` | `/oapi/v1/codeup/organizations/{organizationId}/repositories/{repositoryId}/changeRequests/{localId}/labels` |
 | 列举 MR 评论 | `GET` | `/oapi/v1/codeup/organizations/{organizationId}/repositories/{repositoryId}/changeRequests/{localId}/comments` |
@@ -88,4 +89,4 @@ git@codeup.aliyun.com:685a564391483e233edca392/sharge-web/test.git
 - `edit` 只支持更新标题和描述；云效 `UpdateMergeRequest` 官方接口不支持修改目标分支。
 - `comment` 使用 Codeup OAPI；如果企业域名或仓库版本不支持，命令会失败并给出可操作错误。
 - `merge` 默认会先读取 MR 详情，若能看到冲突或卡点未通过字段则提前失败。
-- 真实验收发现：某些个人 token 可读仓库/类标，但对 `CreateChangeRequest`、`CreateProjectLabel` 返回 403 `Current token has no permission to api.`。这属于 token 权限边界，不要把 token 写入配置或尝试降级保存凭证。
+- 真实验收发现：某些个人 token 可读仓库/类标，但对 `CreateChangeRequest`、`CreateProjectLabel`、`DeleteProjectLabel` 等写操作返回 403 `Current token has no permission to api.`。这属于 token 权限边界，不要把 token 写入配置或尝试降级保存凭证。

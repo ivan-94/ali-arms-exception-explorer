@@ -356,7 +356,11 @@ class YunxiaoClient:
     def _format_http_error(status: int, raw: str) -> str:
         hint = ""
         if status in (401, 403):
-            hint = "。请检查 YUNXIAO_ACCESS_TOKEN 和代码库权限"
+            hint = (
+                "。请检查 YUNXIAO_ACCESS_TOKEN 和代码库权限。"
+                "如果 doctor/label list 可读但 create、label create/delete 等写操作失败，"
+                "通常是 token 缺少 Codeup 合并请求或项目类标读写权限"
+            )
         elif status == 404:
             hint = "。请检查 organization_id、repository_identity/repository_id 和 api_domain"
         body = redact(raw[:500])
@@ -443,6 +447,9 @@ class YunxiaoClient:
             body=body,
         )
         return ensure_dict(payload, "创建类标返回结果")
+
+    def delete_project_label(self, label_id: str) -> Any:
+        return self.oapi_request("DELETE", self.oapi_repo_path(f"/labels/{label_id}"))
 
     def list_merge_request_labels(self, local_id: str) -> list[dict[str, Any]]:
         payload = self.oapi_request(
@@ -544,7 +551,14 @@ def mr_status(mr: dict[str, Any]) -> str:
 
 
 def mr_web_url(mr: dict[str, Any]) -> str:
-    return str(first_present(mr, ["webUrl", "detailUrl", "url"]) or "")
+    return str(first_present(mr, ["detailUrl", "webUrl", "url"]) or "")
+
+
+def mr_url_summary(mr: dict[str, Any]) -> dict[str, str]:
+    detail_url = str(first_present(mr, ["detailUrl"]) or "")
+    web_url = str(first_present(mr, ["webUrl"]) or "")
+    url = detail_url or web_url or str(first_present(mr, ["url"]) or "")
+    return {"url": url, "detailUrl": detail_url, "webUrl": web_url}
 
 
 def mr_source_branch(mr: dict[str, Any]) -> str:
@@ -583,7 +597,18 @@ def print_mr_summary(mr: dict[str, Any]) -> None:
         print(f"branches: {source} -> {target}")
     url = mr_web_url(mr)
     if url:
-        print(f"webUrl: {url}")
+        print(f"url: {url}")
+
+
+def mr_json_envelope(mr: dict[str, Any], **extra: Any) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "localId": mr_local_id(mr),
+        "status": mr_status(mr),
+        **mr_url_summary(mr),
+        "merge_request": mr,
+    }
+    out.update(extra)
+    return out
 
 
 def print_result_summary(result: dict[str, Any]) -> None:
@@ -642,6 +667,26 @@ def resolve_label(client: YunxiaoClient, name: str, create_missing: bool) -> dic
     raise CliError(f"未找到类标: {name}。先执行 label create {name}，或加 --create-missing-label")
 
 
+def resolve_project_label(client: YunxiaoClient, name_or_id: str) -> dict[str, Any]:
+    candidates = client.list_project_labels(search=name_or_id, limit=100)
+    if not candidates:
+        candidates = client.list_project_labels(limit=100)
+    matches = []
+    for label in candidates:
+        try:
+            current_id = label_id(label)
+        except ApiError:
+            current_id = ""
+        if current_id == name_or_id or label_name(label) == name_or_id:
+            matches.append(label)
+    if not matches:
+        raise CliError(f"未找到项目类标: {name_or_id}")
+    if len(matches) > 1:
+        names = ", ".join(f"{label_name(label)}({label_id(label)})" for label in matches)
+        raise CliError(f"找到多个同名项目类标，请改用类标 ID: {names}")
+    return matches[0]
+
+
 def ensure_repository_id(context: YunxiaoContext, client: YunxiaoClient, purpose: str) -> str:
     existing = context.config.get("repository_id")
     if existing:
@@ -658,8 +703,51 @@ def ensure_repository_id(context: YunxiaoContext, client: YunxiaoClient, purpose
     )
 
 
+def doctor_context_payload(context: YunxiaoContext) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "gitRoot": str(context.git_root),
+        "config": str(context.config_path),
+        "domain": context.domain,
+        "apiDomain": context.api_domain,
+        "organizationId": context.organization_id,
+        "repositoryPath": context.repository_path,
+        "repositoryIdentity": context.repository_identity,
+        "defaultTargetBranch": context.default_target_branch,
+    }
+    if context.config.get("repository_id"):
+        payload["repositoryId"] = str(context.config["repository_id"])
+    return payload
+
+
 def command_doctor(args: argparse.Namespace) -> int:
     context = YunxiaoContext(Path(args.config), args.remote)
+    if args.json:
+        payload = doctor_context_payload(context)
+        if args.skip_api:
+            payload["api"] = {"status": "skipped"}
+            payload["ok"] = True
+            print_json(payload)
+            return 0
+        client = YunxiaoClient(context, debug=args.debug)
+        try:
+            client.require_token()
+            repo = client.get_repository()
+            if repo:
+                context.maybe_cache_repository_id(repo)
+                payload = doctor_context_payload(context)
+                payload["api"] = {"status": "ok"}
+            else:
+                labels = client.list_project_labels(limit=1)
+                payload["api"] = {"status": "ok", "labels": len(labels)}
+            payload["ok"] = True
+            print_json(payload)
+            return 0
+        except CliError as exc:
+            payload["api"] = {"status": "error", "message": str(exc)}
+            payload["ok"] = False
+            print_json(payload)
+            return 1
+
     print("yunxiao-mr doctor")
     print(f"git_root: {context.git_root}")
     print(f"config: {context.config_path}")
@@ -716,7 +804,7 @@ def command_create(args: argparse.Namespace) -> int:
         ids = sorted({*(label_id(label) for label in current), *(label_id(label) for label in labels)})
         client.link_merge_request_labels(mr_local_id(mr), ids)
     if args.json:
-        print_json({"merge_request": mr, "labels": labels})
+        print_json(mr_json_envelope(mr, labels=labels))
     else:
         print("MR 已创建。")
         print_mr_summary(mr)
@@ -754,7 +842,7 @@ def command_list(args: argparse.Namespace) -> int:
             ]
             for mr in mrs
         ]
-        print_table(rows, ["localId", "title", "source -> target", "status", "webUrl"])
+        print_table(rows, ["localId", "title", "source -> target", "status", "url"])
     return 0
 
 
@@ -824,6 +912,15 @@ def command_label(args: argparse.Namespace) -> int:
             print_json(label)
         else:
             print(f"类标已创建: {label_name(label)} ({label_id(label)})")
+        return 0
+    if args.label_command == "delete":
+        label = resolve_project_label(client, args.name_or_id)
+        result = client.delete_project_label(label_id(label))
+        out = {"id": label_id(label), "name": label_name(label), "result": result}
+        if args.json:
+            print_json(out)
+        else:
+            print(f"类标已删除: {label_name(label)} ({label_id(label)})")
         return 0
     if args.label_command in {"add", "remove"}:
         current = client.list_merge_request_labels(args.local_id)
@@ -942,6 +1039,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     doctor = subparsers.add_parser("doctor", help="检查本地配置和云效 API 权限")
     doctor.add_argument("--skip-api", action="store_true", help="跳过云效 API 调用")
+    doctor.add_argument("--json", action="store_true", help="输出结构化诊断结果，适合 Agent 解析")
     doctor.set_defaults(func=command_doctor)
 
     create = subparsers.add_parser("create", help="创建合并请求")
@@ -988,10 +1086,14 @@ def build_parser() -> argparse.ArgumentParser:
     label_list.add_argument("--limit", type=int, default=100)
     label_list.add_argument("--json", action="store_true")
     label_list.set_defaults(func=command_label)
-    label_create = label_sub.add_parser("create", help="创建项目类标")
-    label_create.add_argument("name")
-    label_create.add_argument("--color", default=DEFAULT_LABEL_COLOR)
-    label_create.add_argument("--description")
+    label_create = label_sub.add_parser("create", help="创建项目级类标")
+    label_create.add_argument("name", help="项目类标名称")
+    label_create.add_argument(
+        "--color",
+        default=DEFAULT_LABEL_COLOR,
+        help=f"云效允许的类标颜色，默认 {DEFAULT_LABEL_COLOR}",
+    )
+    label_create.add_argument("--description", help="项目类标描述")
     label_create.add_argument("--json", action="store_true")
     label_create.set_defaults(func=command_label)
     label_add = label_sub.add_parser("add", help="给 MR 添加类标")
@@ -1005,6 +1107,10 @@ def build_parser() -> argparse.ArgumentParser:
     label_remove.add_argument("name")
     label_remove.add_argument("--json", action="store_true")
     label_remove.set_defaults(func=command_label)
+    label_delete = label_sub.add_parser("delete", help="删除项目级类标，验收清理临时类标时使用")
+    label_delete.add_argument("name_or_id", help="项目类标名称或 ID；同名时请使用 ID")
+    label_delete.add_argument("--json", action="store_true")
+    label_delete.set_defaults(func=command_label)
 
     comment = subparsers.add_parser("comment", help="创建 MR 评论")
     comment.add_argument("local_id")
@@ -1026,7 +1132,7 @@ def build_parser() -> argparse.ArgumentParser:
     merge = subparsers.add_parser("merge", help="合并 MR")
     merge.add_argument("local_id")
     merge.add_argument("--method", choices=["no-fast-forward", "squash", "rebase", "ff-only"], default="squash")
-    merge.add_argument("--delete-branch", action="store_true")
+    merge.add_argument("--delete-branch", action="store_true", help="合并成功后删除源分支；后续重复删除该分支会显示远端 ref 不存在")
     merge.add_argument("--force", action="store_true", help="跳过本地可见的冲突/卡点预检查")
     merge.add_argument("--json", action="store_true")
     merge.set_defaults(func=command_merge)

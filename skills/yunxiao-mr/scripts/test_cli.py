@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -127,6 +128,16 @@ class CommandLogicTests(unittest.TestCase):
         self.assertNotIn("secret-token", text)
         self.assertIn("<redacted>", text)
 
+    def test_mr_url_prefers_detail_url(self) -> None:
+        mr = {"webUrl": "https://example.com/repo", "detailUrl": "https://example.com/repo/change/1"}
+        self.assertEqual(cli.mr_web_url(mr), "https://example.com/repo/change/1")
+        self.assertEqual(cli.mr_url_summary(mr)["url"], "https://example.com/repo/change/1")
+
+    def test_403_error_mentions_write_permissions(self) -> None:
+        message = cli.YunxiaoClient._format_http_error(403, '{"errorMessage":"Current token has no permission to api."}')
+        self.assertIn("合并请求", message)
+        self.assertIn("项目类标读写权限", message)
+
     def test_create_fails_when_branch_not_pushed(self) -> None:
         fake_context = type(
             "FakeContext",
@@ -159,6 +170,77 @@ class CommandLogicTests(unittest.TestCase):
             with self.assertRaises(cli.CliError) as ctx:
                 cli.command_create(args)
         self.assertIn("git push -u origin feature/x", str(ctx.exception))
+
+    def test_create_json_has_top_level_summary(self) -> None:
+        fake_context = type(
+            "FakeContext",
+            (),
+            {
+                "default_remote": "origin",
+                "default_target_branch": "main",
+                "config": {"repository_id": "123"},
+                "repository_id_or_identity": "123",
+            },
+        )()
+        fake_client = Mock()
+        fake_client.create_merge_request.return_value = {
+            "localId": 12,
+            "status": "UNDER_REVIEW",
+            "detailUrl": "https://example.com/change/12",
+            "webUrl": "https://example.com/repo",
+        }
+        args = Namespace(
+            config=".arms-exceptions/yunxiao.json",
+            remote="origin",
+            debug=False,
+            head="feature/x",
+            base=None,
+            body="body",
+            body_file=None,
+            title="title",
+            reviewer=[],
+            work_item_ids=None,
+            label=[],
+            create_missing_label=False,
+            json=True,
+        )
+        with patch.object(cli, "YunxiaoContext", return_value=fake_context), patch.object(
+            cli, "YunxiaoClient", return_value=fake_client
+        ), patch.object(cli, "remote_branch_exists", return_value=True):
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                cli.command_create(args)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["localId"], "12")
+        self.assertEqual(payload["url"], "https://example.com/change/12")
+        self.assertEqual(payload["webUrl"], "https://example.com/repo")
+        self.assertIn("merge_request", payload)
+
+    def test_doctor_json_reports_missing_token_without_mixed_text(self) -> None:
+        fake_context = type(
+            "FakeContext",
+            (),
+            {
+                "git_root": Path("/repo"),
+                "config_path": Path("/repo/.arms-exceptions/yunxiao.json"),
+                "domain": "codeup.aliyun.com",
+                "api_domain": "openapi-rdc.aliyuncs.com",
+                "organization_id": "org",
+                "repository_path": "org/group/repo",
+                "repository_identity": "org%2Fgroup%2Frepo",
+                "default_target_branch": "main",
+                "config": {},
+            },
+        )()
+        args = Namespace(config=".arms-exceptions/yunxiao.json", remote="origin", debug=False, skip_api=False, json=True)
+        with patch.object(cli, "YunxiaoContext", return_value=fake_context), patch.dict(os.environ, {}, clear=True):
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                exit_code = cli.command_doctor(args)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 1)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["api"]["status"], "error")
 
 
 class ClientRequestTests(unittest.TestCase):
@@ -208,6 +290,12 @@ class ClientRequestTests(unittest.TestCase):
         client.create_project_label("HAT-Ready")
         self.assertEqual(calls[0][3]["label_color"], cli.DEFAULT_LABEL_COLOR)
 
+    def test_delete_label_uses_oapi_delete(self) -> None:
+        client, calls = self.make_client()
+        client.delete_project_label("label-1")
+        self.assertEqual(calls[0][0], "DELETE")
+        self.assertEqual(calls[0][1], "/oapi/v1/codeup/organizations/org/repositories/123/labels/label-1")
+
 
 class LabelCommandTests(unittest.TestCase):
     def make_args(self, label_command: str, **kwargs):
@@ -243,6 +331,18 @@ class LabelCommandTests(unittest.TestCase):
             with redirect_stdout(StringIO()):
                 cli.command_label(self.make_args("remove"))
         fake_client.link_merge_request_labels.assert_called_once_with("12", ["a"])
+
+    def test_label_delete_resolves_name_and_deletes_project_label(self) -> None:
+        fake_client = Mock()
+        fake_client.list_project_labels.return_value = [{"id": "b", "name": "HAT-Ready"}]
+        fake_client.delete_project_label.return_value = {"result": True}
+        with patch.object(cli, "YunxiaoContext"), patch.object(cli, "YunxiaoClient", return_value=fake_client):
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                cli.command_label(self.make_args("delete", name_or_id="HAT-Ready"))
+        fake_client.delete_project_label.assert_called_once_with("b")
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["id"], "b")
 
 
 if __name__ == "__main__":
