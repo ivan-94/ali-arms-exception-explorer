@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Sequence
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 
@@ -44,6 +45,20 @@ cache/
 """
 PARSER_BY_COMMAND: dict[str, argparse.ArgumentParser] = {}
 CURRENT_PARSE_ARGV: list[str] = []
+
+
+def aliyun_cli_missing_message() -> str:
+    return (
+        "错误: 找不到阿里云 CLI: aliyun\n\n"
+        "下一步:\n"
+        f"  按阿里云官方文档安装 CLI: {CLI_INSTALL_URL}\n"
+        "  安装后执行: aliyun version"
+    )
+
+
+def scoped_group_key(fingerprint_key: str, *, target_name: str | None) -> str:
+    scope = (target_name or "unscoped").strip() or "unscoped"
+    return hashlib.sha1("\n".join([scope, fingerprint_key]).encode("utf-8")).hexdigest()[:16]
 
 
 class HelpFormatter(argparse.RawDescriptionHelpFormatter):
@@ -734,13 +749,7 @@ class AliyunCliClient:
                 timeout=self.timeout_seconds,
             )
         except FileNotFoundError as exc:
-            raise AliyunCliError(
-                "错误: 找不到阿里云 CLI: aliyun\n\n"
-                "下一步:\n"
-                "  brew install aliyun-cli\n"
-                f"  安装阿里云 CLI: {CLI_INSTALL_URL}\n"
-                "  安装后执行: aliyun version"
-            ) from exc
+            raise AliyunCliError(aliyun_cli_missing_message()) from exc
         except subprocess.TimeoutExpired as exc:
             raise AliyunCliError(
                 "错误: aliyun 命令超时。\n\n"
@@ -1001,7 +1010,9 @@ class TraceRepository:
         )
 
     def upsert_error_event(self, event: ErrorEvent, *, target_name: str | None) -> None:
+        group_key = scoped_group_key(event.fingerprint.key, target_name=target_name)
         self._upsert_group(
+            group_key,
             event.fingerprint,
             event.trace_id,
             event.span_id,
@@ -1038,7 +1049,7 @@ class TraceRepository:
             returning id
             """,
             (
-                event.fingerprint.key,
+                group_key,
                 event.trace_id,
                 event.span_id,
                 event_index,
@@ -1070,7 +1081,7 @@ class TraceRepository:
             values (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                event.fingerprint.key,
+                group_key,
                 event_id,
                 event.trace_id,
                 event.span_id,
@@ -1083,12 +1094,13 @@ class TraceRepository:
         )
         self.conn.execute(
             "update raw_spans set group_key = coalesce(group_key, ?) where trace_id = ? and span_id = ?",
-            (event.fingerprint.key, event.trace_id, event.span_id),
+            (group_key, event.trace_id, event.span_id),
         )
-        self._refresh_group_counts(event.fingerprint.key)
+        self._refresh_group_counts(group_key)
 
     def _upsert_group(
         self,
+        group_key: str,
         fingerprint: ErrorFingerprint,
         trace_id: str,
         span_id: str,
@@ -1121,7 +1133,7 @@ class TraceRepository:
                 updated_at = excluded.updated_at
             """,
             (
-                fingerprint.key,
+                group_key,
                 target_name,
                 fingerprint.service_name,
                 operation_name,
@@ -1374,7 +1386,7 @@ class TraceIngestionService:
                     if not is_error_span(span, expected_span_ids):
                         continue
                     events = error_events_from_span(span, expected_span_ids)
-                    group_key = events[0].fingerprint.key if events else None
+                    group_key = scoped_group_key(events[0].fingerprint.key, target_name=options.target_name) if events else None
                     self.repository.upsert_span(span, target_name=options.target_name, group_key=group_key)
                     stored_spans += 1
                     for event in events:
@@ -1451,7 +1463,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 重要规则:
   - sync/groups 必须显式传 --target 或 --service，避免跨项目误混。
-  - show 可以只传 group_id；如果本地库无法唯一定位，再补 --target 或 --service。
+  - show 可以只传 group_id；如果查不到或需要限定范围，再补 --target 或 --service。
   - CLI 不保存也不传递 profile、AccessKey 或 Token；身份由 aliyun CLI 默认凭证决定。
   - 需要精确参数时，查看子命令帮助，例如:
      {script_name()} sync --help
@@ -1693,6 +1705,7 @@ def build_parser() -> argparse.ArgumentParser:
   operation    Span/接口名
   type         异常类型
   message      归一化后的错误信息缩略
+  trace_console_url  JSON 输出中可用；按 traceId/spanId 打开阿里云调用链分析页
 """,
     )
     add_scope_args(groups)
@@ -1710,7 +1723,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=HelpFormatter,
         description=(
             "查看单个异常聚合的详情，包括 occurrence、error event、样本堆栈和原始数据入口。"
-            "如果 group_id 在本地库中能唯一定位，可以不传 --target/--service。"
+            "如果 group_id 在本地库中存在，可以不传 --target/--service。"
         ),
         epilog=f"""
 示例:
@@ -1722,11 +1735,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 scope:
   - 不传 --target/--service 时，按本地数据库中的 group_id 精确查找。
-  - 如果查不到或无法唯一定位，按错误提示先运行 groups 或补充 scope。
+  - 如果查不到或需要限定范围，按错误提示先运行 groups 或补充 scope。
 
 排查建议:
   - 先看 message、exception_type、top_stack_frame。
   - 再看 stacktrace、trace_id、span_id。
+  - trace_console_url 可作为控制台跳转辅助；缺失时不要猜 URL。
   - 需要完整原始 tags 时加 --raw-event。
   - 需要完整 ARMS span JSON 时加 --raw-span。
 """,
@@ -1750,7 +1764,7 @@ scope:
         "logs",
         help="查看异常组关联 SLS 日志",
         formatter_class=HelpFormatter,
-        description="按异常组 occurrence 的 trace_id 查询 SLS 关联日志。group_id 本地唯一时可以省略 --target/--service。",
+        description="按异常组 occurrence 的 trace_id 查询 SLS 关联日志。group_id 本地存在时可以省略 --target/--service。",
         epilog=f"""
 示例:
   {script_name()} logs <group_id>
@@ -1826,13 +1840,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         "next_steps": [],
     }
     if not client.is_installed():
-        raise UserFacingError(
-            "错误: 找不到阿里云 CLI: aliyun\n\n"
-            "下一步:\n"
-            "  brew install aliyun-cli\n"
-            f"  安装阿里云 CLI: {CLI_INSTALL_URL}\n"
-            "  安装后执行: aliyun version"
-        )
+        raise UserFacingError(aliyun_cli_missing_message())
 
     result["version"] = client.version()
     config = ProjectConfig.load(args.config)
@@ -2300,7 +2308,7 @@ def cmd_groups(args: argparse.Namespace) -> int:
         repository.close()
 
     if getattr(args, "json_output", False):
-        print(_json({"groups": [row_to_dict(row) for row in rows]}))
+        print(_json({"groups": [group_row_to_payload(row, config=config, scoped_services=services) for row in rows]}))
         return 0
     if not rows:
         print("暂无异常聚合。")
@@ -2376,7 +2384,7 @@ def cmd_show(args: argparse.Namespace) -> int:
 
     if getattr(args, "json_output", False):
         payload = {
-            "group": row_to_dict(group),
+            "group": group_row_to_payload(group, config=config, scoped_services=services),
             "occurrences": [row_to_dict(row) for row in occurrences],
             "events": [_event_row_to_payload(row, raw=args.raw_event) for row in events],
             "sample_event": _event_row_to_payload(sample_event, raw=args.raw_event) if sample_event else None,
@@ -2399,6 +2407,9 @@ def cmd_show(args: argparse.Namespace) -> int:
     print(f"last_seen: {format_epoch_ms(group['last_seen_ms']) if group['last_seen_ms'] else ''}")
     print(f"sample_trace_id: {group['sample_trace_id'] or ''}")
     print(f"sample_span_id: {group['sample_span_id'] or ''}")
+    trace_console_url = trace_console_url_for_group(config, group, scoped_services=services)
+    if trace_console_url:
+        print(f"trace_console_url: {trace_console_url}")
     print()
     print("occurrences:")
     for row in occurrences:
@@ -3285,6 +3296,76 @@ def _scope_where(
 
 def row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return {key: row[key] for key in row.keys()}
+
+
+def group_row_to_payload(
+    row: sqlite3.Row,
+    *,
+    config: ProjectConfig,
+    scoped_services: Sequence[ServiceConfig] | None = None,
+) -> dict[str, Any]:
+    payload = row_to_dict(row)
+    payload["trace_console_url"] = trace_console_url_for_group(config, row, scoped_services=scoped_services)
+    return payload
+
+
+def trace_console_url_for_group(
+    config: ProjectConfig,
+    row: sqlite3.Row,
+    *,
+    scoped_services: Sequence[ServiceConfig] | None = None,
+) -> str | None:
+    service = service_for_group(config, row, scoped_services=scoped_services)
+    if not service:
+        return None
+    return build_trace_console_url(
+        region=service.region,
+        trace_id=row["sample_trace_id"],
+        span_id=row["sample_span_id"],
+    )
+
+
+def service_for_group(
+    config: ProjectConfig,
+    row: sqlite3.Row,
+    *,
+    scoped_services: Sequence[ServiceConfig] | None = None,
+) -> ServiceConfig | None:
+    service_name = str(row["service_name"] or "").strip()
+    target_name = _optional_str(row["target_name"])
+    if not service_name:
+        return None
+
+    candidates: list[ServiceConfig] = []
+    if scoped_services:
+        candidates.extend(service for service in scoped_services if service.name == service_name)
+    if not candidates:
+        for target in config.targets:
+            if target_name and target.name != target_name:
+                continue
+            candidates.extend(service for service in target.services if service.name == service_name)
+    if not candidates:
+        return None
+
+    regions = {service.region for service in candidates if service.region}
+    if len(regions) != 1:
+        return None
+    return candidates[0]
+
+
+def build_trace_console_url(*, region: str | None, trace_id: str | None, span_id: str | None = None) -> str | None:
+    clean_region = (region or "").strip()
+    clean_trace_id = (trace_id or "").strip()
+    clean_span_id = (span_id or "").strip()
+    if not clean_region or not clean_trace_id:
+        return None
+    filters = f'traceId="{clean_trace_id}"'
+    if clean_span_id:
+        filters += f' AND spanId="{clean_span_id}"'
+    return (
+        f"https://trace.console.aliyun.com/#/{quote(clean_region, safe='')}/tracing-explorer"
+        f"?source=XTRACE&filters={quote(filters, safe='')}"
+    )
 
 
 def sync_summary_to_dict(summary: SyncSummary) -> dict[str, Any]:

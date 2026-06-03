@@ -180,6 +180,37 @@ class CliTests(unittest.TestCase):
         self.assertIn("--target ai-service-dev", stdout)
         self.assertIn("--max-traces", stdout)
 
+    def test_doctor_missing_aliyun_uses_official_install_guidance(self) -> None:
+        client = mock.Mock()
+        client.is_installed.return_value = False
+
+        with mock.patch.object(app, "build_client", return_value=client):
+            code, stdout, stderr = self.run_main(["doctor"])
+
+        self.assertEqual(code, 1)
+        self.assertEqual(stdout, "")
+        self.assertIn("找不到阿里云 CLI", stderr)
+        self.assertIn(app.CLI_INSTALL_URL, stderr)
+        self.assertNotIn("brew install", stderr)
+
+    def test_aliyun_cli_client_missing_binary_uses_official_install_guidance(self) -> None:
+        client = app.AliyunCliClient(executable="definitely-missing-aliyun-for-test")
+
+        with self.assertRaises(app.AliyunCliError) as context:
+            client.version()
+
+        self.assertIn(app.CLI_INSTALL_URL, context.exception.message)
+        self.assertNotIn("brew install", context.exception.message)
+
+    def test_build_trace_console_url_filters_trace_and_span(self) -> None:
+        url = app.build_trace_console_url(region="cn-beijing", trace_id="trace-1", span_id="span-1")
+
+        self.assertEqual(
+            url,
+            "https://trace.console.aliyun.com/#/cn-beijing/tracing-explorer"
+            "?source=XTRACE&filters=traceId%3D%22trace-1%22%20AND%20spanId%3D%22span-1%22",
+        )
+
     def test_ambiguous_option_prints_friendly_help(self) -> None:
         code, stdout, stderr = self.run_main(["groups", "--target", "ai-service-dev", "--s"])
 
@@ -301,6 +332,33 @@ class CliTests(unittest.TestCase):
         self.assertIn("ai-service-dev-celery-worker", stderr)
         self.assertIn("下一步", stderr)
 
+    def test_sync_json_contract_uses_range_fresh_summaries_and_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / ".arms-exceptions" / "config.json"
+            db_path = Path(tmp) / ".arms-exceptions" / "data" / "exceptions.sqlite3"
+            self.write_config(config_path)
+
+            with mock.patch.object(app, "build_client", return_value=FakeClient()):
+                code, stdout, stderr = self.run_main(
+                    [
+                        "--config",
+                        str(config_path),
+                        "--db",
+                        str(db_path),
+                        "sync",
+                        "--service",
+                        "ai-service-dev-celery-worker",
+                        "--json",
+                    ]
+                )
+
+        payload = json.loads(stdout)
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(set(payload), {"failures", "fresh", "range", "summaries"})
+        self.assertTrue(payload["fresh"])
+        self.assertEqual(payload["failures"], [])
+        self.assertEqual(payload["summaries"][0]["service_name"], "ai-service-dev-celery-worker")
+
     def test_sync_defaults_to_fresh_and_removes_old_groups(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / ".arms-exceptions" / "config.json"
@@ -387,6 +445,11 @@ class CliTests(unittest.TestCase):
         self.assertIn("related_logs: ok", stdout)
         self.assertIn("project: ai-service-logs", stdout)
         self.assertIn("query: trace-1", stdout)
+        self.assertIn(
+            "trace_console_url: https://trace.console.aliyun.com/#/cn-beijing/tracing-explorer"
+            "?source=XTRACE&filters=traceId%3D%22trace-1%22%20AND%20spanId%3D%22span-1%22",
+            stdout,
+        )
         self.assertIn("bsasr_gpt_stream error: transcribe is empty", stdout)
         self.assertIn("log_original=app_websocket_asr_gpt.py:275 in bsasr_gpt_stream", stdout)
         self.assertEqual(fake_client.sls_queries[0]["query"], "trace-1")
@@ -534,6 +597,11 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(code, 0, stderr)
         self.assertEqual(raw_code, 0, raw_stderr)
+        self.assertEqual(
+            compact_payload["group"]["trace_console_url"],
+            "https://trace.console.aliyun.com/#/cn-beijing/tracing-explorer"
+            "?source=XTRACE&filters=traceId%3D%22trace-1%22%20AND%20spanId%3D%22span-1%22",
+        )
         compact_item = compact_payload["related_logs"]["queries"][0]["items"][0]
         raw_item = raw_payload["related_logs"]["queries"][0]["items"][0]
         self.assertNotIn("raw", compact_item)

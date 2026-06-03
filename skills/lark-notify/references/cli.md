@@ -44,8 +44,8 @@ python3 skills/lark-notify/scripts/cli.py config --show --json
 
 ```bash
 python3 skills/lark-notify/scripts/cli.py send \
-  --title "ARMS 异常分诊" \
-  --body-file .arms-exceptions/triage/<run-id>/summary.md \
+  --title "Agent 通知" \
+  --body-file <report.md> \
   --format text
 ```
 
@@ -64,12 +64,16 @@ payload:
 
 ```bash
 python3 skills/lark-notify/scripts/cli.py send \
-  --title "ARMS 异常分诊" \
-  --body-file .arms-exceptions/triage/<run-id>/summary.md \
+  --title "Agent 通知" \
+  --body-file <report.md> \
   --format card
 ```
 
-payload 类型为 `interactive`，包含标题和一个 Markdown 内容块。自定义机器人卡片只用于展示和 URL 跳转，不处理回调交互。
+payload 类型为 `interactive`，包含标题和一个 `lark_md` 文本块。
+
+`card` 是通用简单卡片：CLI 不理解业务字段，不做领域翻译，也不把某类报告格式改写成另一类格式。业务专用卡片应由业务 skill 生成 raw 飞书 payload，再用 `--format raw` 发送。
+
+飞书卡片只支持 Markdown 子集。自定义机器人卡片只用于展示和 URL 跳转，不处理回调交互。
 
 ## 发送 raw payload
 

@@ -137,14 +137,14 @@ class PayloadTests(unittest.TestCase):
             title="标题",
             body="x" * 1000,
             fmt="text",
-            report_path=".arms-exceptions/triage/run/summary.md",
+            report_path="report.md",
             max_bytes=400,
         )
 
         self.assertTrue(truncated)
         self.assertLessEqual(cli.payload_size(payload), 400)
         self.assertIn("内容已截断", payload["content"]["text"])
-        self.assertIn(".arms-exceptions/triage/run/summary.md", payload["content"]["text"])
+        self.assertIn("report.md", payload["content"]["text"])
 
     def test_redact_masks_credentials_and_webhook(self) -> None:
         text = (

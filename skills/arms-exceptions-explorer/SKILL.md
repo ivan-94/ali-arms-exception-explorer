@@ -9,6 +9,8 @@ description: 从宿主项目拉取、聚合并查看阿里云 ARMS 异常 Span�
 
 这个 skill 用随仓库分发的 CLI 读取阿里云 ARMS 调用链异常数据。CLI 输出是事实来源；只要 CLI 能检查，就不要根据截图、日志片段、记忆或二手摘要推断 ARMS 状态。
 
+边界：本 skill 只负责发现、同步和查看 ARMS/SLS 证据。需要自动分诊、派发修复或创建 MR 时，改用 `arms-exceptions-triage` 或 `fix-arms-exception`。
+
 入口始终在宿主项目根目录执行：
 
 ```bash
@@ -29,14 +31,14 @@ python3 skills/arms-exceptions-explorer/scripts/cli.py <command>
 | 查看配置范围 | `targets` |
 | 同步异常 | `sync --target <target>` 或 `sync --service <service>` |
 | 查看异常组 | `groups --target <target>` 或 `groups --service <service>` |
-| 查看详情 | `show <group_id> --target <target>` 或 `show <group_id> --service <service>` |
-| 只看关联日志 | `logs <group_id> --target <target>` |
+| 查看详情 | `show <group_id>`；查不到或需要限定范围时补 `--target` / `--service` |
+| 只看关联日志 | `logs <group_id>`；查不到或需要限定范围时补 `--target` / `--service` |
 | 关闭 show 中的日志查询 | `show <group_id> --no-logs ...` |
 | 需要原始异常 tags | `show <group_id> --raw-event ...` |
 | 需要原始 span JSON | `show <group_id> --raw-span --json ...` |
 | 需要原始 SLS 日志 | `show <group_id> --raw-logs --json ...` 或 `logs <group_id> --raw --json ...` |
 
-完整参数、JSON 输出和配置结构见 `references/cli.md`。
+常用参数、JSON 输出和配置结构见 `references/cli.md`；完整实时参数以各子命令 `--help` 为准。
 
 ## Prerequisites
 
@@ -101,11 +103,11 @@ aliyun configure switch --profile <profile>
 2. 如果项目尚未配置 target/service，先找 ARMS TRACE 应用再初始化：
 
    ```bash
-   python3 skills/arms-exceptions-explorer/scripts/cli.py apps # 列出所有 ARMS Services 
+   python3 skills/arms-exceptions-explorer/scripts/cli.py apps --region <region> --search <keyword>
    python3 skills/arms-exceptions-explorer/scripts/cli.py init --help # 查看如何初始化
    ```
 
-   列出服务和本地分支之后，可以引导和帮助用户初始化。
+   如果 region 不明确，先让用户确认 ARMS 地域。列出服务和本地分支之后，可以引导和帮助用户初始化。
 
    如果需要配置关联日志，先发现 SLS Project/Logstore：
 
@@ -135,15 +137,15 @@ aliyun configure switch --profile <profile>
 6. 打开相关异常组：
 
    ```bash
-   python3 skills/arms-exceptions-explorer/scripts/cli.py show <group_id> --target <target>
+   python3 skills/arms-exceptions-explorer/scripts/cli.py show <group_id>
    ```
 
-   `show` 默认会在 service 已配置 SLS 时按 `trace_id` 查询关联日志。日志不可用时继续使用 ARMS 异常证据，不要把 `related_logs: not_configured`、`empty` 或 `failed` 当作异常不存在。
+   `show` 会先按本地 SQLite 中的 `group_id` 精确查找；如果查不到或需要限定范围，再按 CLI 错误提示补 `--target` 或 `--service`。`show` 默认会在 service 已配置 SLS 时按 `trace_id` 查询关联日志。日志不可用时继续使用 ARMS 异常证据，不要把 `related_logs: not_configured`、`empty` 或 `failed` 当作异常不存在。
 
 7. 需要单独重查日志时：
 
    ```bash
-   python3 skills/arms-exceptions-explorer/scripts/cli.py logs <group_id> --target <target>
+   python3 skills/arms-exceptions-explorer/scripts/cli.py logs <group_id>
    ```
 
 8. 用 `top_stack_frame`、`stacktrace`、`trace_id`、`span_id`、`service_name`、`operation_name`、occurrence 和关联日志信息回到代码排查。
@@ -152,16 +154,17 @@ aliyun configure switch --profile <profile>
 
 - 先跑 `doctor`，再做任何 ARMS 调查。
 - 遇到失败时，先执行 CLI 输出里的“下一步”命令，再提出假设。
-- `sync`、`groups`、`show` 必须传 `--target` 或 `--service`；不要静默跨越所有项目。
+- `sync` 和 `groups` 必须传 `--target` 或 `--service`；不要静默跨越所有项目。
+- `show` 和 `logs` 可以只传 `group_id`；如果查不到或需要限定范围，再按错误提示补 `--target` 或 `--service`。
 - `sync` 默认刷新本次 target/service scope 的本地旧异常数据；需要保留旧数据时显式加 `--keep-old-data`。
 - `sync --target <target>` 中某个 service 失败时，使用 CLI 输出的单 service 重试命令排查。
 - `show --raw-event` 用于查看原始异常 tags 和 stack 字段。
 - 只有摘要事件不够时才用 `show --raw-span`；原始 span 可能很大。
-- `show` 默认查询 SLS 关联日志；不需要日志或担心外部查询时加 `--no-logs`。
+- `show` 默认查询 SLS 关联日志；生产敏感场景、不需要日志或担心外部查询时加 `--no-logs`。
 - SLS 是可选增强；`doctor` 中 SLS 状态不影响 ARMS 主流程。
 - `sls projects` 和 `sls logstores` 只做只读发现，不会写配置。
 - 关联日志默认按 `trace_id` 做全文查询，不按字段名或 span_id 过滤。
-- 完整 SLS raw log 可能包含敏感业务数据，只能在确实需要时用 `--raw-logs --json` 或 `logs --raw --json`。
+- SLS 日志可能包含敏感业务数据；默认只展示归一化摘要，完整 raw log 只能在确实需要时用 `--raw-logs --json` 或 `logs --raw --json`。
 - 下游工具或后续分析需要结构化数据时使用 `--json`。
 - 不要打印凭证、签名 URL、`AccessKey`、`SecurityToken`、`Signature`、`Authorization`、OAuth code，或可能包含这些内容的原始命令输出。
 - `.arms-exceptions/config.json` 是项目配置，只应包含 target、branch、region、service、pid、app_id、SLS project/logstore/endpoint 等非凭证信息。
@@ -177,7 +180,12 @@ skills/arms-exceptions-explorer/
     cli.md
   scripts/
     cli.py
+    arms_exceptions/
+      app.py
+    test_*.py
 ```
 
 - `references/cli.md`：CLI 参数、JSON 输出、配置格式或排障细节不足时读取。
 - `scripts/cli.py`：CLI 执行入口；运行命令时始终调用这个脚本。
+- `scripts/arms_exceptions/app.py`：真实命令、错误提示、JSON payload 和 scope 解析实现；需要核对行为时读取。
+- `scripts/test_*.py`：CLI 行为和聚合逻辑的回归测试；修改行为时同步检查。

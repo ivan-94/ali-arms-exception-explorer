@@ -4,7 +4,16 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from arms_exceptions.app import ServiceConfig, SyncOptions, TraceIngestionService, TraceRepository, resolve_window_ms
+from arms_exceptions.app import (
+    ErrorEvent,
+    ErrorFingerprint,
+    ServiceConfig,
+    SyncOptions,
+    TraceIngestionService,
+    TraceRepository,
+    resolve_window_ms,
+    scoped_group_key,
+)
 
 
 class FakeAliyunClient:
@@ -64,6 +73,60 @@ class FakeAliyunClient:
 
 
 class IngestionTests(unittest.TestCase):
+    def error_event(self, *, trace_id: str) -> ErrorEvent:
+        fingerprint = ErrorFingerprint(
+            key="same-fingerprint",
+            service_name="ai-service-dev-celery-worker",
+            exception_type="ExecutorError",
+            message="ExecutorError: failed <long-number>",
+            top_stack_frame="/app/ai_daily/report.py:generate_report",
+            source="celery.task_failure",
+            code_filepath=None,
+            code_function=None,
+            code_lineno=None,
+        )
+        return ErrorEvent(
+            trace_id=trace_id,
+            span_id="span-error",
+            event_index=None,
+            timestamp_ms=1780386659094,
+            service_name="ai-service-dev-celery-worker",
+            operation_name="run/ai_daily.generate_report",
+            source="celery.task_failure",
+            exception_type="ExecutorError",
+            message="ExecutorError: failed <long-number>",
+            stacktrace='File "/app/ai_daily/report.py", line 12, in generate_report',
+            top_stack_frame="/app/ai_daily/report.py:generate_report",
+            code_filepath=None,
+            code_function=None,
+            code_lineno=None,
+            log_original=None,
+            is_handled=None,
+            is_synthetic=None,
+            raw_tags={"celery.exception_type": "ExecutorError"},
+            fingerprint=fingerprint,
+        )
+
+    def test_same_fingerprint_is_grouped_per_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = TraceRepository(Path(tmp) / "arms.sqlite")
+            try:
+                repo.upsert_error_event(self.error_event(trace_id="trace-dev"), target_name="ai-service-dev")
+                repo.upsert_error_event(self.error_event(trace_id="trace-stage"), target_name="ai-service-stage")
+                repo.commit()
+
+                dev_groups = repo.list_groups(target_name="ai-service-dev", service_names=["ai-service-dev-celery-worker"])
+                stage_groups = repo.list_groups(target_name="ai-service-stage", service_names=["ai-service-dev-celery-worker"])
+            finally:
+                repo.close()
+
+        self.assertEqual([row["group_key"] for row in dev_groups], [scoped_group_key("same-fingerprint", target_name="ai-service-dev")])
+        self.assertEqual(
+            [row["group_key"] for row in stage_groups],
+            [scoped_group_key("same-fingerprint", target_name="ai-service-stage")],
+        )
+        self.assertNotEqual(dev_groups[0]["group_key"], stage_groups[0]["group_key"])
+
     def test_ingestion_persists_only_error_spans_and_groups(self) -> None:
         start_ms, end_ms = resolve_window_ms("1h")
         with tempfile.TemporaryDirectory() as tmp:

@@ -24,7 +24,7 @@ python3 skills/lark-notify/scripts/cli.py <command>
 | 保存 Webhook | `config --webhook-url <url>` |
 | 查看配置状态 | `config --show` |
 | 文本通知 | `send --title ... --body-file ... --format text` |
-| 卡片通知 | `send --title ... --body-file ... --format card` |
+| 简单卡片 | `send --title ... --body-file ... --format card` |
 | 原始 payload | `send --json-file ... --format raw` |
 | 预览不发送 | `send ... --dry-run` |
 
@@ -59,8 +59,8 @@ python3 skills/lark-notify/scripts/cli.py config --webhook-url <webhook>
 
    ```bash
    python3 skills/lark-notify/scripts/cli.py send \
-     --title "ARMS 异常分诊" \
-     --body-file .arms-exceptions/triage/<run-id>/summary.md \
+     --title "Agent 通知" \
+     --body-file <report.md> \
      --format card \
      --dry-run
    ```
@@ -69,8 +69,8 @@ python3 skills/lark-notify/scripts/cli.py config --webhook-url <webhook>
 
    ```bash
    python3 skills/lark-notify/scripts/cli.py send \
-     --title "ARMS 异常分诊" \
-     --body-file .arms-exceptions/triage/<run-id>/summary.md \
+     --title "Agent 通知" \
+     --body-file <report.md> \
      --format card
    ```
 
@@ -79,6 +79,8 @@ python3 skills/lark-notify/scripts/cli.py config --webhook-url <webhook>
 - 不要在回复、日志、MR 或报告中打印完整 Webhook。
 - 不要发送凭证、Authorization header、AccessKey、Secret、Token、SecurityToken、签名 URL 或 OAuth code。
 - 异常 message、关键 stack frame、根因、修复建议和少量 raw event/log 摘要可以发送。
+- `card` 是通用简单卡片，只把正文放入飞书 `lark_md` 文本块，不理解业务字段，也不做领域翻译。
+- 业务专用卡片必须由对应业务 skill 生成 raw 飞书 payload，再用 `--format raw` 发送。
 - 超过飞书自定义机器人 20 KB 请求体限制时，CLI 会截断正文并保留本地报告路径。
 - 发送真实 Webhook 前优先跑 `--dry-run`。
 - `raw` 只用于已经构造好的飞书 payload；普通 Agent 报告优先用 `text` 或 `card`。

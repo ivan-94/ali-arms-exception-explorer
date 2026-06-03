@@ -15,6 +15,12 @@ description: 修复已经被 ARMS 分诊确认的可修复异常，从诊断报�
 /fix-arms-exception .arms-exceptions/triage/<run-id>/subagents/diagnose-<stable-slug>.md
 ```
 
+如果由 `arms-exceptions-triage` 调度，父 Agent 会同时提供结果输出路径：
+
+```text
+.arms-exceptions/triage/<run-id>/subagents/fix-<stable-slug>.md
+```
+
 ## Input Contract
 
 诊断报告必须包含：
@@ -58,7 +64,7 @@ description: 修复已经被 ARMS 分诊确认的可修复异常，从诊断报�
      --json
    ```
 
-10. 输出最终总结，包含 MR `localId` 和详情页 URL。
+10. 输出最终总结，包含 MR `localId` 和详情页 URL；由 triage 调度时，必须同时写入父 Agent 提供的 `result_path`。
 
 MR 正文模板、失败处理和总结模板见 `references/workflow.md`。
 
@@ -69,12 +75,14 @@ MR 正文模板、失败处理和总结模板见 `references/workflow.md`。
 - 分支名已存在时，先检查现有分支/worktree，再决定继续或创建后缀分支。
 - 测试失败或无法复现时，不创建 MR；把失败证据写入修复总结。
 - 如果修复需要外部权限、数据迁移、发布动作、跨仓库变更或产品判断，改为 `needs_human` 并回写 triage 总结。
+- 由 `arms-exceptions-triage` 调度时，即使 blocked/needs_human，也必须把结果写入 `.arms-exceptions/triage/<run-id>/subagents/fix-<stable-slug>.md`，方便父 Agent 汇总和清理。
 - 不打印、保存或发送凭证、Authorization header、AccessKey、Token、SecurityToken、签名 URL 或 OAuth code。
 
 ## Output
 
 最终总结包含：
 
+- `status: fixed | blocked | needs_human`；
 - 修复分支和 worktree；
 - 变更摘要；
 - 验证命令和结果；

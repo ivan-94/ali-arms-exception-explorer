@@ -15,14 +15,30 @@ python3 skills/arms-exceptions-explorer/scripts/cli.py doctor --skip-api
 
 `doctor` 会检查 `aliyun` 是否存在、版本是否可读取、ARMS 应用列表 API 是否可用。失败时按输出中的 `下一步` 处理。
 
-如果缺少 `aliyun`，macOS 上优先安装：
+如果缺少 `aliyun`，不要假设用户的操作系统或包管理器。引导用户按阿里云官方文档安装：
+
+https://help.aliyun.com/zh/cli/install-update-alibaba-cloud-cli
+
+安装完成后必须重跑：
 
 ```bash
-brew install aliyun-cli
 python3 skills/arms-exceptions-explorer/scripts/cli.py doctor
 ```
 
-其他系统参考阿里云 CLI 安装文档：`https://help.aliyun.com/zh/cli/install-update-alibaba-cloud-cli`。
+## JSON 输出契约
+
+所有命令默认输出人类可读文本；需要结构化消费时加 `--json`。JSON 字段名应保持稳定，且不包含凭证。完整参数以对应子命令 `--help` 为准，下面只列 Agent 常用结构化字段。
+
+- `doctor --json`：顶层包含 `status`、`aliyun_installed`、`version`、`app_list_api`、`configured_service_api`、`config`、`config_exists`、`sls_api_available`、`sls_configured_services`、`sls_optional`、`next_steps`。
+- `apps --json`：顶层 `apps` 数组；每项包含 `name`、`region`、`pid`、`app_id`、`type`。
+- `sls projects --json`：顶层 `projects` 数组；每项包含 `project`。
+- `sls logstores --json`：顶层包含 `project`、`endpoint`、`logstores`。
+- `init --json`：顶层包含 `config`、`gitignore`、`target`、`services`。
+- `targets --json`：输出 `.arms-exceptions/config.json` 的配置结构，顶层包含 `version`、`default_window`、`targets`。
+- `sync --json`：顶层包含 `range`、`fresh`、`summaries`、`failures`；单个 service 失败时仍会输出成功 service 的摘要，并以退出码 `1` 标记部分失败。
+- `groups --json`：顶层 `groups` 数组；每项包含表格字段的完整值，并尽量补 `trace_console_url`。
+- `show --json`：顶层包含 `group`、`occurrences`、`events`、`sample_event`、`sample_span`、`related_logs`。
+- `logs --json`：顶层包含 `group_id`、`related_logs`。
 
 ## 应用列表
 
@@ -116,7 +132,7 @@ python3 skills/arms-exceptions-explorer/scripts/cli.py groups --service ai-servi
 python3 skills/arms-exceptions-explorer/scripts/cli.py groups --target ai-service-dev --json
 ```
 
-`message` 在表格里是缩略展示；完整信息在 `show` 中查看。
+`message` 在表格里是缩略展示；完整信息在 `show` 中查看。JSON 输出会尽量为每个 group 补 `trace_console_url`，前提是配置中能定位该 service 的 region 且 group 有 `sample_trace_id`。
 
 ## 查看详情
 
@@ -131,15 +147,18 @@ python3 skills/arms-exceptions-explorer/scripts/cli.py show <group_id> --log-lim
 python3 skills/arms-exceptions-explorer/scripts/cli.py show <group_id> --raw-logs --json
 ```
 
-默认输出摘要、occurrences、error events、样本堆栈、精简 tags 和可选 SLS 关联日志。`show` 会按本地数据库中的 `group_id` 精确查找；如果无法唯一定位，再按 CLI 错误提示补 `--target` 或 `--service`。`--raw-event` 输出样本事件 tags；`--raw-span` 输出 ARMS 原始 span JSON。
+默认输出摘要、occurrences、error events、样本堆栈、精简 tags 和可选 SLS 关联日志。`show` 会按本地数据库中的 `group_id` 精确查找；如果查不到或需要限定范围，再按 CLI 错误提示补 `--target` 或 `--service`。`--raw-event` 输出样本事件 tags；`--raw-span` 输出 ARMS 原始 span JSON。
+
+当配置中能定位 service region 且 group 有 sample trace 时，`show` 文本和 JSON 的 `group.trace_console_url` 会输出一个阿里云调用链分析页链接。该链接使用阿里云官方 SLS 关联调用链文档中的 `trace.console.aliyun.com/#/<region>/tracing-explorer?source=XTRACE&filters=...` 过滤格式；它是跳转辅助，不代表接收者账号一定有权限看到该 trace。缺失时继续使用 `sample_trace_id`、`sample_span_id` 和本地 `show --json` 证据排查。
 
 SLS 关联日志规则：
 
 - service 配置了 `sls` 时，`show` 默认按 occurrence 的 `trace_id` 做全文查询。
+- 生产敏感场景、不需要日志或担心外部查询时，先加 `--no-logs`。
 - 默认只查 1 个 occurrence，窗口为前后 120 秒，每个 trace 最多 50 条。
 - `--no-logs` 关闭日志查询。
 - `--log-occurrences`、`--log-before`、`--log-after`、`--log-limit` 覆盖默认查询范围。
-- `--raw-logs --json` 才保留原始 SLS log item。
+- 默认只展示归一化日志摘要；`--raw-logs --json` 才保留原始 SLS log item。
 - SLS 未配置、查空或查询失败不会让 `show` 失败。
 
 ## 查看关联日志
