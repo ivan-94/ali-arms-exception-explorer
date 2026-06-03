@@ -21,7 +21,8 @@ from typing import Any, Iterable
 DEFAULT_CONFIG_PATH = Path(".arms-exceptions") / "yunxiao.json"
 DEFAULT_REMOTE = "origin"
 TOKEN_ENV = "YUNXIAO_ACCESS_TOKEN"
-DEFAULT_LABEL_COLOR = "#2da44e"
+DEFAULT_LABEL_COLOR = "#3BA630"
+DEFAULT_STANDARD_API_DOMAIN = "openapi-rdc.aliyuncs.com"
 
 
 class CliError(Exception):
@@ -130,6 +131,12 @@ def parse_codeup_remote(remote_url: str) -> RemoteInfo:
     )
 
 
+def infer_api_domain(git_domain: str) -> str:
+    if git_domain.lower() == "codeup.aliyun.com":
+        return DEFAULT_STANDARD_API_DOMAIN
+    return git_domain
+
+
 def infer_default_target_branch(remote: str) -> str:
     head = run_git(["symbolic-ref", f"refs/remotes/{remote}/HEAD"], check=False)
     if head:
@@ -179,6 +186,7 @@ class YunxiaoContext:
             inferred = {
                 "version": 1,
                 "domain": info.domain,
+                "api_domain": infer_api_domain(info.domain),
                 "organization_id": info.organization_id,
                 "repository_path": info.repository_path,
                 "repository_identity": info.repository_identity,
@@ -188,9 +196,16 @@ class YunxiaoContext:
             for key, value in inferred.items():
                 config.setdefault(key, value)
             self._write_config(config)
-        elif "default_target_branch" not in config:
-            config["default_target_branch"] = infer_default_target_branch(remote_name)
-            self._write_config(config)
+        else:
+            changed = False
+            if "default_target_branch" not in config:
+                config["default_target_branch"] = infer_default_target_branch(remote_name)
+                changed = True
+            if "api_domain" not in config:
+                config["api_domain"] = infer_api_domain(str(config["domain"]))
+                changed = True
+            if changed:
+                self._write_config(config)
         return config
 
     @staticmethod
@@ -205,6 +220,10 @@ class YunxiaoContext:
     @property
     def domain(self) -> str:
         return str(self.config["domain"])
+
+    @property
+    def api_domain(self) -> str:
+        return str(self.config.get("api_domain") or infer_api_domain(self.domain))
 
     @property
     def organization_id(self) -> str:
@@ -274,10 +293,21 @@ class YunxiaoClient:
         self,
         method: str,
         path: str,
+        query: dict[str, Any] | None = None,
         body: dict[str, Any] | None = None,
     ) -> Any:
         token = self.require_token()
-        return self._request(method, path, {}, body, headers={"x-yunxiao-token": token})
+        clean_query = {key: value for key, value in (query or {}).items() if value is not None}
+        return self._request(method, path, clean_query, body, headers={"x-yunxiao-token": token})
+
+    def oapi_repo_path(self, suffix: str = "") -> str:
+        return (
+            f"/oapi/v1/codeup/organizations/{self.context.organization_id}/repositories/"
+            f"{self.context.repository_id_or_identity}{suffix}"
+        )
+
+    def oapi_org_path(self, suffix: str = "") -> str:
+        return f"/oapi/v1/codeup/organizations/{self.context.organization_id}{suffix}"
 
     def _request(
         self,
@@ -287,7 +317,7 @@ class YunxiaoClient:
         body: dict[str, Any] | None,
         headers: dict[str, str],
     ) -> Any:
-        base = f"https://{self.context.domain}"
+        base = f"https://{self.context.api_domain}"
         url = base + path
         if query:
             url += "?" + urllib.parse.urlencode(query, doseq=True)
@@ -328,131 +358,118 @@ class YunxiaoClient:
         if status in (401, 403):
             hint = "。请检查 YUNXIAO_ACCESS_TOKEN 和代码库权限"
         elif status == 404:
-            hint = "。请检查 organization_id、repository_identity/repository_id 和 domain"
+            hint = "。请检查 organization_id、repository_identity/repository_id 和 api_domain"
         body = redact(raw[:500])
         return f"云效 API HTTP {status}{hint}: {body}"
 
     def get_repository(self) -> dict[str, Any] | None:
-        payload = self.devops_request(
+        payload = self.oapi_request(
             "GET",
-            "/repository/get",
-            query={"identity": self.context.repository_query_identity},
+            self.oapi_repo_path(),
         )
-        result = unwrap_result(payload)
-        return result if isinstance(result, dict) else None
+        return payload if isinstance(payload, dict) else None
 
     def create_merge_request(self, body: dict[str, Any]) -> dict[str, Any]:
-        payload = self.devops_request(
+        payload = self.oapi_request(
             "POST",
-            f"/api/v4/projects/{self.context.repository_id_or_identity}/merge_requests",
+            self.oapi_repo_path("/changeRequests"),
             body=body,
         )
-        return ensure_dict(unwrap_result(payload), "创建 MR 返回结果")
+        return ensure_dict(payload, "创建 MR 返回结果")
 
     def list_merge_requests(self, **query: Any) -> list[dict[str, Any]]:
-        payload = self.devops_request("GET", "/api/v4/projects/merge_requests/advanced_search", query=query)
-        result = unwrap_result(payload)
-        return coerce_items(result)
+        payload = self.oapi_request("GET", self.oapi_org_path("/changeRequests"), query=query)
+        return coerce_items(payload)
 
     def get_merge_request(self, local_id: str) -> dict[str, Any]:
-        payload = self.devops_request(
+        payload = self.oapi_request(
             "GET",
-            f"/api/v4/projects/{self.context.repository_id_or_identity}/merge_requests/{local_id}/detail",
+            self.oapi_repo_path(f"/changeRequests/{local_id}"),
         )
-        return ensure_dict(unwrap_result(payload), "MR 详情")
+        return ensure_dict(payload, "MR 详情")
 
     def update_merge_request(self, local_id: str, body: dict[str, Any]) -> dict[str, Any]:
-        payload = self.devops_request(
+        payload = self.oapi_request(
             "PUT",
-            f"/api/v4/projects/{self.context.repository_id_or_identity}/merge_requests/{local_id}",
+            self.oapi_repo_path(f"/changeRequests/{local_id}"),
             body=body,
         )
-        return ensure_dict(unwrap_result(payload), "更新 MR 返回结果")
+        return ensure_dict(payload, "更新 MR 返回结果")
 
     def close_merge_request(self, local_id: str) -> dict[str, Any]:
-        payload = self.devops_request(
+        payload = self.oapi_request(
             "POST",
-            f"/api/v4/projects/{self.context.repository_id_or_identity}/merge_requests/{local_id}/close",
+            self.oapi_repo_path(f"/changeRequests/{local_id}/close"),
         )
-        return ensure_dict(unwrap_result(payload), "关闭 MR 返回结果")
+        return ensure_dict(payload, "关闭 MR 返回结果")
 
     def reopen_merge_request(self, local_id: str) -> dict[str, Any]:
-        payload = self.devops_request(
+        payload = self.oapi_request(
             "POST",
-            f"/api/v4/projects/{self.context.repository_id_or_identity}/merge_requests/{local_id}/reopen",
+            self.oapi_repo_path(f"/changeRequests/{local_id}/reopen"),
         )
-        return ensure_dict(unwrap_result(payload), "重开 MR 返回结果")
+        return ensure_dict(payload, "重开 MR 返回结果")
 
     def merge_merge_request(self, local_id: str, body: dict[str, Any]) -> dict[str, Any]:
-        payload = self.devops_request(
+        payload = self.oapi_request(
             "POST",
-            f"/api/v4/projects/{self.context.repository_id_or_identity}/merge_requests/{local_id}/merge",
+            self.oapi_repo_path(f"/changeRequests/{local_id}/merge"),
             body=body,
         )
-        return ensure_dict(unwrap_result(payload), "合并 MR 返回结果")
+        return ensure_dict(payload, "合并 MR 返回结果")
 
     def list_project_labels(self, search: str | None = None, limit: int = 100, with_counts: bool = False) -> list[dict[str, Any]]:
-        payload = self.devops_request(
+        payload = self.oapi_request(
             "GET",
-            "/api/v4/projects/labels",
+            self.oapi_repo_path("/labels"),
             query={
-                "repositoryIdentity": self.context.repository_query_identity,
                 "search": search,
                 "page": 1,
-                "pageSize": limit,
-                "withCounts": str(with_counts).lower(),
+                "per_page": limit,
+                "with_counts": str(with_counts).lower(),
             },
         )
-        return coerce_items(unwrap_result(payload))
+        return coerce_items(payload)
 
     def create_project_label(
         self, name: str, color: str | None = DEFAULT_LABEL_COLOR, description: str | None = None
     ) -> dict[str, Any]:
-        body = {"name": name, "color": color or DEFAULT_LABEL_COLOR}
+        body = {"label_name": name, "label_color": color or DEFAULT_LABEL_COLOR}
         if description:
-            body["description"] = description
-        payload = self.devops_request(
-            "POST",
-            "/api/v4/projects/labels",
-            query={"repositoryIdentity": self.context.repository_query_identity},
-            body=body,
-        )
-        return ensure_dict(unwrap_result(payload), "创建类标返回结果")
-
-    def list_merge_request_labels(self, local_id: str) -> list[dict[str, Any]]:
-        payload = self.devops_request(
-            "GET",
-            "/api/v4/projects/merge_requests/labels",
-            query={"repositoryIdentity": self.context.repository_query_identity, "localId": local_id},
-        )
-        return coerce_items(unwrap_result(payload))
-
-    def link_merge_request_labels(self, local_id: str, label_ids: list[str]) -> Any:
-        payload = self.devops_request(
-            "POST",
-            "/api/v4/projects/merge_requests/link_labels",
-            query={"repositoryIdentity": self.context.repository_query_identity, "localId": local_id},
-            body={"labelIds": label_ids},
-        )
-        return unwrap_result(payload)
-
-    def list_merge_request_comments(self, local_id: str) -> list[dict[str, Any]]:
-        payload = self.devops_request(
-            "POST",
-            "/api/v4/projects/merge_requests/comments/list_comments",
-            query={"repositoryIdentity": self.context.repository_query_identity, "localId": local_id},
-            body={},
-        )
-        return coerce_items(unwrap_result(payload))
-
-    def create_comment(self, local_id: str, content: str) -> dict[str, Any]:
-        path = (
-            f"/oapi/v1/codeup/organizations/{self.context.organization_id}/repositories/"
-            f"{self.context.repository_id_or_identity}/changeRequests/{local_id}/comments"
-        )
+            body["label_description"] = description
         payload = self.oapi_request(
             "POST",
-            path,
+            self.oapi_repo_path("/labels"),
+            body=body,
+        )
+        return ensure_dict(payload, "创建类标返回结果")
+
+    def list_merge_request_labels(self, local_id: str) -> list[dict[str, Any]]:
+        payload = self.oapi_request(
+            "GET",
+            self.oapi_repo_path(f"/changeRequests/{local_id}/labels"),
+        )
+        return coerce_items(payload)
+
+    def link_merge_request_labels(self, local_id: str, label_ids: list[str]) -> Any:
+        payload = self.oapi_request(
+            "POST",
+            self.oapi_repo_path(f"/changeRequests/{local_id}/labels"),
+            body={"label_id_list": label_ids},
+        )
+        return payload
+
+    def list_merge_request_comments(self, local_id: str) -> list[dict[str, Any]]:
+        try:
+            payload = self.oapi_request("GET", self.oapi_repo_path(f"/changeRequests/{local_id}/comments"))
+        except ApiError:
+            return []
+        return coerce_items(payload)
+
+    def create_comment(self, local_id: str, content: str) -> dict[str, Any]:
+        payload = self.oapi_request(
+            "POST",
+            self.oapi_repo_path(f"/changeRequests/{local_id}/comments"),
             body={
                 "comment_type": "GLOBAL_COMMENT",
                 "content": content,
@@ -460,7 +477,7 @@ class YunxiaoClient:
                 "resolved": False,
             },
         )
-        return ensure_dict(unwrap_result(payload), "创建评论返回结果")
+        return ensure_dict(payload, "创建评论返回结果")
 
 
 def unwrap_result(payload: Any) -> Any:
@@ -490,6 +507,8 @@ def coerce_items(result: Any) -> list[dict[str, Any]]:
                 value = result["page"].get(key)
                 if isinstance(value, list):
                     return [item for item in value if isinstance(item, dict)]
+        if result.get("result") is True:
+            return []
     raise ApiError(f"无法识别列表返回结构: {type(result).__name__}")
 
 
@@ -645,6 +664,7 @@ def command_doctor(args: argparse.Namespace) -> int:
     print(f"git_root: {context.git_root}")
     print(f"config: {context.config_path}")
     print(f"domain: {context.domain}")
+    print(f"api_domain: {context.api_domain}")
     print(f"organization_id: {context.organization_id}")
     print(f"repository_path: {context.repository_path}")
     print(f"repository_identity: {context.repository_identity}")

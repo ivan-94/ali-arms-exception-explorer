@@ -72,6 +72,7 @@ class ConfigTests(unittest.TestCase):
                 context = cli.YunxiaoContext()
             config_path = repo / ".arms-exceptions" / "yunxiao.json"
             self.assertTrue(config_path.exists())
+            self.assertEqual(context.config["api_domain"], "openapi-rdc.aliyuncs.com")
             self.assertEqual(context.config["organization_id"], "685a564391483e233edca392")
             self.assertEqual(context.config["repository_identity"], "685a564391483e233edca392%2Fsharge-web%2Ftest")
             self.assertEqual(context.config["default_target_branch"], "main")
@@ -91,6 +92,7 @@ class ConfigTests(unittest.TestCase):
             with chdir(repo):
                 context = cli.YunxiaoContext()
             self.assertEqual(context.domain, "custom.example.com")
+            self.assertEqual(context.api_domain, "custom.example.com")
             self.assertEqual(context.default_target_branch, "develop")
             self.assertEqual(context.config["repository_id"], 123)
 
@@ -166,6 +168,7 @@ class ClientRequestTests(unittest.TestCase):
             (),
             {
                 "domain": "codeup.aliyun.com",
+                "api_domain": "openapi-rdc.aliyuncs.com",
                 "organization_id": "org",
                 "repository_identity": "org%2Fgroup%2Frepo",
                 "repository_path": "org/group/repo",
@@ -178,17 +181,20 @@ class ClientRequestTests(unittest.TestCase):
 
         def fake_request(method, path, query=None, body=None, headers=None):
             calls.append((method, path, query, body, headers))
-            if path == "/api/v4/projects/labels" and method == "GET":
+            if path.endswith("/labels") and method == "GET":
                 return {"success": True, "result": []}
             return {"success": True, "result": {"result": True}}
 
         client._request = fake_request
         return client, calls
 
-    def test_label_queries_use_unencoded_repository_path(self) -> None:
+    def test_label_queries_use_repository_id_when_available(self) -> None:
         client, calls = self.make_client()
         client.list_project_labels()
-        self.assertEqual(calls[0][2]["repositoryIdentity"], "org/group/repo")
+        self.assertEqual(
+            calls[0][1],
+            "/oapi/v1/codeup/organizations/org/repositories/123/labels",
+        )
 
     def test_close_reopen_merge_use_post(self) -> None:
         client, calls = self.make_client()
@@ -200,7 +206,7 @@ class ClientRequestTests(unittest.TestCase):
     def test_create_label_uses_default_color(self) -> None:
         client, calls = self.make_client()
         client.create_project_label("HAT-Ready")
-        self.assertEqual(calls[0][3]["color"], cli.DEFAULT_LABEL_COLOR)
+        self.assertEqual(calls[0][3]["label_color"], cli.DEFAULT_LABEL_COLOR)
 
 
 class LabelCommandTests(unittest.TestCase):

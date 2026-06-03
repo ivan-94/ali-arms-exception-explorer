@@ -85,14 +85,14 @@ python3 skills/yunxiao-mr/scripts/cli.py edit 12 --title "新标题" --body-file
 
 ```bash
 python3 skills/yunxiao-mr/scripts/cli.py label list
-python3 skills/yunxiao-mr/scripts/cli.py label create HAT-Ready --color "#2da44e"
+python3 skills/yunxiao-mr/scripts/cli.py label create HAT-Ready --color "#3BA630"
 python3 skills/yunxiao-mr/scripts/cli.py label add 12 HAT-Ready --create-missing-label
 python3 skills/yunxiao-mr/scripts/cli.py label remove 12 HAT-Ready
 ```
 
 `label add` 默认不创建缺失类标。需要创建时显式加 `--create-missing-label`。
 
-`label create` 的 `--color` 默认是 `#2da44e`，因为云效创建类标接口要求颜色。
+`label create` 的 `--color` 默认是 `#3BA630`，因为云效创建类标接口要求使用云效允许的固定颜色值。
 
 ### comment
 

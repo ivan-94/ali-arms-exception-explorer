@@ -4,38 +4,35 @@
 
 旧版 DevOps OpenAPI 使用 `accessToken` query 参数；新版 Codeup OAPI 使用 `x-yunxiao-token` 请求头。CLI 统一从 `YUNXIAO_ACCESS_TOKEN` 读取 token，并在输出中脱敏。
 
-## DevOps API
+## API domain
 
-这些接口以 `https://{domain}` 为 base URL，并带 query：
+仓库 remote 里的 `codeup.aliyun.com` 是 Git/页面域名，不是标准版 OpenAPI 服务接入点。CLI 缓存两个域名：
 
-- `organizationId`
-- `accessToken`
+- `domain`: 从 Git remote 推断出的 Codeup 域名，用于仓库身份推断。
+- `api_domain`: OpenAPI base host。标准 Codeup remote 默认推断为 `openapi-rdc.aliyuncs.com`；专属域名可在 `.arms-exceptions/yunxiao.json` 中手动覆盖。
+
+请求统一以 `https://{api_domain}` 为 base URL，并使用 `x-yunxiao-token` 请求头。
+
+## Codeup OAPI
 
 常用路径：
 
 | 能力 | Method | Path |
 | --- | --- | --- |
-| 查询仓库 | `GET` | `/repository/get` |
-| 创建 MR | `POST` | `/api/v4/projects/{repositoryId}/merge_requests` |
-| 查询 MR 列表 | `GET` | `/api/v4/projects/merge_requests/advanced_search` |
-| 查询 MR 详情 | `GET` | `/api/v4/projects/{repositoryId}/merge_requests/{localId}/detail` |
-| 更新 MR | `PUT` | `/api/v4/projects/{repositoryId}/merge_requests/{localId}` |
-| 关闭 MR | `POST` | `/api/v4/projects/{repositoryId}/merge_requests/{localId}/close` |
-| 重开 MR | `POST` | `/api/v4/projects/{repositoryId}/merge_requests/{localId}/reopen` |
-| 合并 MR | `POST` | `/api/v4/projects/{repositoryId}/merge_requests/{localId}/merge` |
-| 列举项目类标 | `GET` | `/api/v4/projects/labels` |
-| 创建项目类标 | `POST` | `/api/v4/projects/labels` |
-| 列举 MR 类标 | `GET` | `/api/v4/projects/merge_requests/labels` |
-| 关联 MR 类标 | `POST` | `/api/v4/projects/merge_requests/link_labels` |
-| 列举 MR 评论 | `POST` | `/api/v4/projects/merge_requests/comments/list_comments` |
-
-## Codeup OAPI
-
-全局评论使用新版 OAPI：
-
-```text
-POST /oapi/v1/codeup/organizations/{organizationId}/repositories/{repositoryId}/changeRequests/{localId}/comments
-```
+| 查询仓库 | `GET` | `/oapi/v1/codeup/organizations/{organizationId}/repositories/{repositoryId}` |
+| 创建 MR | `POST` | `/oapi/v1/codeup/organizations/{organizationId}/repositories/{repositoryId}/changeRequests` |
+| 查询 MR 列表 | `GET` | `/oapi/v1/codeup/organizations/{organizationId}/changeRequests` |
+| 查询 MR 详情 | `GET` | `/oapi/v1/codeup/organizations/{organizationId}/repositories/{repositoryId}/changeRequests/{localId}` |
+| 更新 MR | `PUT` | `/oapi/v1/codeup/organizations/{organizationId}/repositories/{repositoryId}/changeRequests/{localId}` |
+| 关闭 MR | `POST` | `/oapi/v1/codeup/organizations/{organizationId}/repositories/{repositoryId}/changeRequests/{localId}/close` |
+| 重开 MR | `POST` | `/oapi/v1/codeup/organizations/{organizationId}/repositories/{repositoryId}/changeRequests/{localId}/reopen` |
+| 合并 MR | `POST` | `/oapi/v1/codeup/organizations/{organizationId}/repositories/{repositoryId}/changeRequests/{localId}/merge` |
+| 列举项目类标 | `GET` | `/oapi/v1/codeup/organizations/{organizationId}/repositories/{repositoryId}/labels` |
+| 创建项目类标 | `POST` | `/oapi/v1/codeup/organizations/{organizationId}/repositories/{repositoryId}/labels` |
+| 列举 MR 类标 | `GET` | `/oapi/v1/codeup/organizations/{organizationId}/repositories/{repositoryId}/changeRequests/{localId}/labels` |
+| 关联 MR 类标 | `POST` | `/oapi/v1/codeup/organizations/{organizationId}/repositories/{repositoryId}/changeRequests/{localId}/labels` |
+| 列举 MR 评论 | `GET` | `/oapi/v1/codeup/organizations/{organizationId}/repositories/{repositoryId}/changeRequests/{localId}/comments` |
+| 创建 MR 评论 | `POST` | `/oapi/v1/codeup/organizations/{organizationId}/repositories/{repositoryId}/changeRequests/{localId}/comments` |
 
 请求头：
 
@@ -67,13 +64,14 @@ git@codeup.aliyun.com:685a564391483e233edca392/sharge-web/test.git
 ```json
 {
   "domain": "codeup.aliyun.com",
+  "api_domain": "openapi-rdc.aliyuncs.com",
   "organization_id": "685a564391483e233edca392",
   "repository_path": "685a564391483e233edca392/sharge-web/test",
   "repository_identity": "685a564391483e233edca392%2Fsharge-web%2Ftest"
 }
 ```
 
-部分接口文档标注 `repositoryId` 为数字代码库 ID。CLI 会优先调用 `/repository/get` 尝试把 `repository_path` 解析成数字 `repository_id` 并缓存；解析失败时对支持路径身份的接口仍然继续运行。query 参数中的 `repositoryIdentity` 使用未编码全路径，URL path 中的仓库身份才使用 URL encode 后的 `repository_identity`。
+部分接口文档标注 `repositoryId` 可以是数字代码库 ID 或 URL encode 后的全路径。CLI 会先用 `repository_identity` 查询仓库，拿到数字 `repository_id` 后写回缓存；后续命令优先使用数字 ID。
 
 ## Label Semantics
 
@@ -88,5 +86,6 @@ git@codeup.aliyun.com:685a564391483e233edca392/sharge-web/test.git
 ## Known Limits
 
 - `edit` 只支持更新标题和描述；云效 `UpdateMergeRequest` 官方接口不支持修改目标分支。
-- `comment` 使用新版 Codeup OAPI；如果企业域名或仓库版本不支持，命令会失败并给出 MR URL。
+- `comment` 使用 Codeup OAPI；如果企业域名或仓库版本不支持，命令会失败并给出可操作错误。
 - `merge` 默认会先读取 MR 详情，若能看到冲突或卡点未通过字段则提前失败。
+- 真实验收发现：某些个人 token 可读仓库/类标，但对 `CreateChangeRequest`、`CreateProjectLabel` 返回 403 `Current token has no permission to api.`。这属于 token 权限边界，不要把 token 写入配置或尝试降级保存凭证。

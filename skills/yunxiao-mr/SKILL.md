@@ -66,7 +66,7 @@ export YUNXIAO_ACCESS_TOKEN=<personal_access_token>
 .arms-exceptions/yunxiao.json
 ```
 
-这个文件是非凭证缓存。必要时可以人工补充 `repository_id`、`default_target_branch` 或自定义 `domain`。
+这个文件是非凭证缓存。必要时可以人工补充 `repository_id`、`default_target_branch`、自定义 `domain` 或自定义 `api_domain`。
 
 ## Workflow
 
