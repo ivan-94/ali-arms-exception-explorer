@@ -1,6 +1,45 @@
-# Ali ARMS Exception Explorer
+# Agent Skills for Ali Cloud Workflows
 
 [![skills.sh](https://skills.sh/b/ivan-94/ali-arms-exception-explorer)](https://skills.sh/ivan-94/ali-arms-exception-explorer)
+
+这个仓库提供面向 Agent 的阿里云工作流 skills。
+
+当前包含：
+
+- **ARMS Exceptions Explorer**：拉取、聚合并查看阿里云 ARMS 异常调用链 Span。
+- **Yunxiao MR**：在云效 Codeup 仓库创建、查看、更新、评论、打类标、关闭、重开和合并 MR。
+
+## Yunxiao MR
+
+在需要管理云效 Codeup 合并请求的项目里安装 skill：
+
+```bash
+npx skills@latest add ivan-94/ali-arms-exception-explorer \
+  --skill yunxiao-mr \
+  -a codex
+```
+
+配置云效个人访问令牌：
+
+```bash
+export YUNXIAO_ACCESS_TOKEN=<personal_access_token>
+```
+
+让 Agent 执行云效 MR 流程，或手动运行：
+
+```bash
+python3 skills/yunxiao-mr/scripts/cli.py doctor
+python3 skills/yunxiao-mr/scripts/cli.py create --title "修复异常聚合" --body-file /tmp/mr.md
+python3 skills/yunxiao-mr/scripts/cli.py list --state opened
+python3 skills/yunxiao-mr/scripts/cli.py view <localId> --comments
+python3 skills/yunxiao-mr/scripts/cli.py label add <localId> HAT-Ready --create-missing-label
+```
+
+第一次运行时，CLI 会从 Codeup Git remote 推断仓库信息，并把非凭证缓存写入 `.arms-exceptions/yunxiao.json`。凭证只从 `YUNXIAO_ACCESS_TOKEN` 读取，不写入仓库。
+
+完整说明见 **[skills/yunxiao-mr](./skills/yunxiao-mr/SKILL.md)**。
+
+## ARMS Exceptions Explorer
 
 一个用于排查阿里云 ARMS 异常调用链的 Agent skill。它会把异常 Span 拉到代码仓库本地，按错误指纹聚合，并给 Codex 或 Claude 提供可追溯的调试证据。
 
@@ -8,7 +47,7 @@
 
 这个项目刻意保持简单：一个 skill，一个 Python CLI，不依赖阿里云 Python SDK，也不保存凭证。
 
-## 快速开始
+### 快速开始
 
 1. 在需要排查的项目里安装 skill：
 
@@ -38,7 +77,7 @@ python3 skills/arms-exceptions-explorer/scripts/cli.py show <group_id>
 
 执行后，Agent 会拿到限定范围内的异常组、样本堆栈、`trace_id`、`span_id`、必要时的原始事件 tags，以及足够回到代码排查的上下文。
 
-## 为什么做这个
+### 为什么做这个
 
 我做这个 skill，是为了修掉 Agent 排查 ARMS 服务时反复出现的三个问题。
 
@@ -77,7 +116,7 @@ python3 skills/arms-exceptions-explorer/scripts/cli.py show <group_id> --raw-eve
 python3 skills/arms-exceptions-explorer/scripts/cli.py show <group_id> --raw-span --json
 ```
 
-## 它会做什么
+### 它会做什么
 
 - 发现当前 `aliyun` CLI 身份能看到的 ARMS TRACE 应用。
 - 创建项目本地的 `.arms-exceptions/config.json`。
@@ -87,7 +126,7 @@ python3 skills/arms-exceptions-explorer/scripts/cli.py show <group_id> --raw-spa
 - 按 service、异常类型、归一化错误信息和顶部栈帧聚合异常。
 - 在缺少授权、配置或范围时输出下一步命令。
 
-## 安全模型
+### 安全模型
 
 这个工具把身份认证交给阿里云 CLI。
 
@@ -109,7 +148,7 @@ aliyun configure switch --profile <profile>
 .arms-exceptions/data/
 ```
 
-## 参考
+### 参考
 
 ### Skill
 

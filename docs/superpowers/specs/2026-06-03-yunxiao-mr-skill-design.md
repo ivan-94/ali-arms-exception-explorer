@@ -44,7 +44,7 @@
 
 ### Open questions / risks
 
-- Some APIs use `repositoryId` path parameters while label APIs use `repositoryIdentity` query parameters. The CLI must normalize this and cache numeric `repository_id` only if a specific endpoint rejects the encoded repository path.
+- Some APIs use numeric `repositoryId` path parameters while label APIs use `repositoryIdentity` query parameters. The CLI must normalize this by using `repository_path` for query identity, URL-encoded `repository_identity` for path identity, and cached numeric `repository_id` for APIs that require it.
 - Comment creation appears in the newer ChangeRequest OAPI. Implementation must verify the exact path and response shape before exposing `comment` as stable.
 - Actual acceptance mutates the provided test repository; it must require a real `YUNXIAO_ACCESS_TOKEN` with Codeup permissions and should clean up or clearly identify test MRs and labels.
 
@@ -156,7 +156,7 @@ Default base branch inference:
 3. `master`.
 4. Fail with a clear message requiring `--base` or a manual config edit.
 
-If an API requires a numeric repository ID, the CLI should resolve it through a repository query endpoint and cache it as:
+APIs such as create, view, edit, close, reopen, and merge require a numeric repository ID. The CLI should resolve it through `/repository/get` and cache it as:
 
 ```json
 {
@@ -276,12 +276,13 @@ Options:
 
 ### `edit <localId>`
 
-Updates only explicitly provided fields:
+Updates only explicitly provided fields supported by Yunxiao `UpdateMergeRequest`:
 
 - `--title <text>`
 - `--body <text>`
 - `--body-file <path>`
-- `--base <branch>`
+
+The official update API only supports title and description. It does not support changing the target branch.
 
 ### `label list`
 
@@ -392,7 +393,7 @@ Required behavior:
 - Non-Codeup remote: show the current remote and the expected SSH/HTTPS shapes.
 - Remote parse failure: suggest manual `.arms-exceptions/yunxiao.json` fields.
 - 401/403: say token or Codeup permission is invalid.
-- 404: suggest checking `organization_id`, `repository_identity`, and `domain`.
+- 404: suggest checking `organization_id`, `repository_identity`, `repository_id`, and `domain`.
 - Missing label: suggest `label create` or `--create-missing-label`.
 - Branch not pushed: suggest `git push -u origin <branch>`.
 - Unexpected response shape: show a concise error; only `--debug` shows sanitized details.
