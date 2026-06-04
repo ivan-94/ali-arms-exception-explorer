@@ -1,140 +1,384 @@
 ---
 name: arms-exceptions-triage
-description: 在 CI 或 Agent 自动流程中分诊一个 ARMS target/service，拉取证据、去重诊断、关联 MR，并对明确 bug 派发 SubAgent(high) 修复。Use when 用户要求分诊、排查、汇总、处理或完整处理 ARMS 异常。
+description: 在 CI 或 Agent 自动流程中分诊单个 ARMS target/service，编排 explorer、Yunxiao MR、fix-arms-exception 与 Lark 通知，产出本地 triage 报告；除非用户显式要求 triage-only，否则对明确 bug 且无强证据 MR 覆盖的代表项派发 SubAgent(high) 修复。Use when 用户要求分诊、排查、汇总、处理或完整处理 ARMS 异常。
 ---
 
-# ARMS 异常分诊
+```python
+from skill_contract import *
 
-## Overview
+skill(
+    name="arms-exceptions-triage",
+    purpose="在 CI 或 Agent 自动流程中完整分诊一个 ARMS target/service 的异常，聚合诊断、判断 MR 覆盖、按需派发修复并通知结果。",
+    summary="父 Agent 只负责编排和聚合；异常详情、代码诊断、修复和测试必须交给 Sub Agent 或相邻 skill 完成。",
+    version="0.2.0",
+    short_description="编排 ARMS 异常分诊、MR 覆盖判断、修复派发和通知。",
+    tags=["arms", "triage", "subagent", "yunxiao", "lark"],
+    compatibility=["codex", "generic-agent"],
+)
 
-这个 skill 编排 `arms-exceptions-explorer`、`yunxiao-mr`、`fix-arms-exception` 和 `lark-notify`。目标是 CI/Agent 自动执行完整链路；除非调用方显式要求 triage-only，否则不要在修复前等待用户干预。
+activate_when(
+    [
+        "用户要求分诊、排查、汇总、处理或完整处理 ARMS 异常",
+        "用户要求在 CI 或 Agent 自动流程中处理一个 ARMS target 或 service 的异常",
+        "用户要求对 ARMS 异常做去重诊断、关联 Yunxiao MR、派发修复或发送 Lark 通知",
+        "宿主项目需要运行 arms-exceptions-triage 编排 explorer、yunxiao-mr、fix-arms-exception 和 lark-notify",
+    ],
+    match="any",
+    strength="strong",
+)
 
-一次只处理一个 target；service 输入必须能唯一反查到所属 target。缺配置、缺权限或需要人工判断时，记录为 blocked/needs_human 并通知，不进入交互式追问。
+do_not_activate_when([
+    "用户只要求读取单个异常 group 的详情、stacktrace 或 raw event，应使用 arms-exceptions-explorer",
+    "用户已经有 status=bug 的诊断报告并要求修复单个异常，应使用 fix-arms-exception",
+    "用户只要求管理 Yunxiao/Codeup MR、类标或评论，应使用 yunxiao-mr",
+    "用户只要求发送或配置飞书通知，应使用 lark-notify",
+    "用户要求修改本 skill 源仓库代码，而不是在宿主项目执行 ARMS 分诊流程",
+])
 
-## Agent Responsibilities
+inputs(
+    required=[
+        input(
+            "target_or_service",
+            type=NaturalLanguage,
+            description="用户给出的 ARMS target 名称或 service 名称；service 必须能从 targets --json 唯一反查 target。",
+        ),
+    ],
+    optional=[
+        input(
+            "host_root",
+            type=Directory,
+            description="触发 triage 的宿主项目根目录；默认使用当前工作目录。",
+            default="current working directory",
+            required=False,
+        ),
+        input(
+            "window",
+            type=Text,
+            description="同步异常的时间窗口；未提供时使用宿主项目配置或 explorer 默认值。",
+            required=False,
+        ),
+        input(
+            "execution_mode",
+            type=Text,
+            description="full_auto 或 triage_only；除非用户显式要求 triage-only/只分诊，否则默认 full_auto。",
+            default="full_auto",
+            required=False,
+        ),
+        input(
+            "run_id",
+            type=Text,
+            description="本次 triage 产物目录 ID；未提供时生成 <YYYYMMDDTHHMMSS>-<target-or-service>。",
+            required=False,
+        ),
+    ],
+    ask_when_missing=True,
+)
 
-父 Agent 只负责协调、调度、聚合和判断：
+outputs(
+    required=[
+        output(
+            "triage_artifacts",
+            type=Directory,
+            description="HOST_ROOT/.arms-exceptions/triage/<run-id>/ 下的 groups、dedupe、post-diagnosis、MR、summary、source manifest 和通知 payload。",
+            success_criteria=[
+                "所有产物写在 HOST_ROOT，而不是 triage worktree 的相对路径",
+                "source-manifest.md 包含 Sources、Produced artifacts、Key decisions、Verification evidence 和 Open questions / risks",
+                "groups.json、dedupe.json、post-diagnosis-dedupe.json、summary.md 和 lark-card.json 路径明确",
+            ],
+        ),
+        output(
+            "summary_report",
+            type=File,
+            description="中文 summary.md，记录分诊结论、代表异常、重复合并、MR 覆盖、修复结果、风险和下一步。",
+        ),
+        output(
+            "notification_result",
+            type=Text,
+            description="lark-notify raw card 发送结果；无法发送时记录本地 payload 路径和失败原因。",
+        ),
+    ],
+    optional=[
+        output(
+            "fix_results",
+            type=Text,
+            description="full_auto 模式下 SubAgent(high) 执行 fix-arms-exception 后写回的 MR、blocked 或 needs_human 结果。",
+        ),
+    ],
+)
 
-- 可以读取配置、运行 `doctor/targets/sync/groups`、创建/清理 worktree、维护产物、派发 Sub Agent、汇总 Sub Agent 报告、做 MR 覆盖判断和最终通知。
-- 不能修改任何业务代码或测试。
-- 不能亲自探索业务代码、异常详情、stacktrace 或根因；不能打开业务代码文件做诊断。
-- 复聚合和 MR 覆盖判断只能使用 `groups --json` 元数据、Sub Agent 报告和 `yunxiao-mr` 输出；报告证据不足时，必须派发补充诊断 Sub Agent。
-- 遇到需要代码路径、异常详情、日志详情、根因、修复方案或测试范围判断的工作，必须派发 Sub Agent。
+resources(
+    references=[
+        reference(
+            "references/workflow.md",
+            purpose="诊断报告模板、Sub Agent brief、二次聚合、MR 覆盖判断、summary、飞书卡片和 cleanup 细节。",
+            when="准备派发 Sub Agent、判断复聚合/MR 覆盖、生成 summary/source-manifest/lark-card 或处理异常路径时",
+            read_strategy="always",
+            grep_patterns=["Sub Agent 派发合同", "诊断后复聚合", "MR 覆盖判断", "Source Manifest", "Cleanup"],
+        ),
+    ],
+)
 
-Sub Agent 负责实际诊断和修复：
+environment(
+    variables=[
+        env("YUNXIAO_ACCESS_TOKEN", required=False, secret=True, purpose="yunxiao-mr 只从环境变量读取的访问 token；不得写入报告。"),
+        env("ARMS_LARK_WEBHOOK_URL", required=False, secret=True, purpose="lark-notify 的可选 webhook 来源；不得打印完整 URL。"),
+    ],
+    commands=["python3", "git", "rg"],
+    network="required",
+    filesystem="workspace",
+)
 
-- 诊断 Sub Agent 调用 `arms-exceptions-explorer show/logs` 获取异常详情，探索业务代码并产出诊断报告。
-- 修复 Sub Agent 调用 `fix-arms-exception`，编辑业务代码/测试、运行验证并创建 MR。
+workflow(
+    [
+        step(
+            "resolve_scope",
+            f"""
+            在 HOST_ROOT 运行 doctor 和 targets，解析 target_or_service、services、branch 和窗口。
+            使用 {call_skill(
+                "arms-exceptions-explorer",
+                how="from HOST_ROOT run doctor and targets --json; if input is a service, require targets --json to map it to exactly one target",
+                mode="compose",
+                expect="one target, one configured branch, and the services to process",
+                on_failure="write blocked/needs_human evidence and stop without guessing target, branch, or default project",
+            )}。
+            """,
+            reads=["target_or_service", "host_root", "window"],
+            writes=["scope", "source_manifest"],
+        ),
+        step(
+            "prepare_artifacts_and_worktree",
+            f"""
+            生成 run_id，创建 HOST_ROOT/.arms-exceptions/triage/<run-id>/，确认忽略 triage/worktrees 本地产物，并从 target.branch 创建 TRIAGE_WORKTREE_ROOT。
+            使用 {call_tool(
+                "git",
+                how="create or switch to HOST_ROOT/.arms-exceptions/worktrees/triage-<run-id>/ from the configured target branch; record commands, cwd, branch, and paths in source-manifest.md",
+                expect="isolated triage worktree rooted under HOST_ROOT/.arms-exceptions/worktrees/",
+                on_failure="continue only when read-only triage can still run safely in HOST_ROOT; otherwise record blocked and notify",
+            )}。
+            """,
+            reads=["scope", "run_id"],
+            writes=["triage_artifacts", "triage_worktree_root", "source_manifest"],
+        ),
+        step(
+            "sync_and_collect_groups",
+            f"""
+            在 TRIAGE_WORKTREE_ROOT 同步异常并保存 groups.json。
+            使用 {call_skill(
+                "arms-exceptions-explorer",
+                how="run sync --target <target> --json or sync --service <service> --json, then groups --target <target> --json or groups --service <service> --json; write the groups output to HOST_ROOT/.arms-exceptions/triage/<run-id>/groups.json",
+                mode="compose",
+                expect="groups.json contains each retained group plus group/sample_trace_id and trace_console_url when explorer can derive it",
+                on_failure="write sync failure details to summary/source-manifest and notify instead of continuing with stale or guessed groups",
+            )}。
+            """,
+            reads=["scope", "triage_worktree_root"],
+            writes=["groups_json", "source_manifest"],
+        ),
+        step(
+            "initial_dedupe",
+            "父 Agent 只基于 groups --json 元数据做初筛聚合，保存 dedupe.json；group_id 只作为本次运行内定位，不能作为跨运行强证据。",
+            reads=["groups_json"],
+            writes=["dedupe_json", "source_manifest"],
+        ),
+        step(
+            "dispatch_diagnostics",
+            f"""
+            对 dedupe.json 中保留的代表异常派发 medium-effort 诊断 Sub Agent；brief 必须独立可执行，并包含 HOST_ROOT、TRIAGE_WORKTREE_ROOT、target、services、branch、group_id、related_group_ids、查看命令和 output_path。
+            使用 {call_subagent(
+                "arms-diagnosis",
+                "diagnose each retained ARMS exception group without editing business code",
+                how="spawn one or more medium-effort diagnostic Sub Agents with the reference workflow diagnostic brief; require each report at HOST_ROOT/.arms-exceptions/triage/<run-id>/subagents/diagnose-<stable-slug>.md and require Source Manifest sections",
+                context="isolated diagnostic context with HOST_ROOT, TRIAGE_WORKTREE_ROOT, groups.json, dedupe.json, and references/workflow.md brief only",
+                effort="medium",
+                result_path="HOST_ROOT/.arms-exceptions/triage/<run-id>/subagents/diagnose-<stable-slug>.md",
+                expect="diagnostic reports with status noise | needs_human | bug, confidence, evidence, code paths when bug, repair suggestion, tests, and Source Manifest",
+                on_failure="mark the item blocked/needs_human or dispatch a supplemental diagnostic Sub Agent; do not infer code-level evidence in the parent",
+            )}。
+            """,
+            reads=["dedupe_json"],
+            writes=["diagnostic_reports", "source_manifest"],
+        ),
+        step(
+            "post_diagnosis_dedupe",
+            "父 Agent 收集诊断报告后必须基于 Sub Agent 报告中的根因、代码路径、修复建议和证据复聚合，保存 post-diagnosis-dedupe.json；被合并重复项不得独立进入 MR 覆盖判断或修复派发。",
+            reads=["diagnostic_reports"],
+            writes=["post_diagnosis_dedupe_json", "source_manifest"],
+        ),
+        step(
+            "check_mr_coverage",
+            f"""
+            只对 post-diagnosis-dedupe.json 的代表项做 Yunxiao MR 覆盖判断；不得用 group_id 单独判定 covered。
+            使用 {call_skill(
+                "yunxiao-mr",
+                how="run list --state opened --json and targeted view/search checks as needed; compare MR title/body/comments against diagnostic report fields, root cause, code path, branch, service, operation, and normalized message",
+                mode="compose",
+                expect="existing-mrs.json with covered, maybe_related, or not_related decisions and evidence for each representative item",
+                on_failure="record maybe_related or blocked rather than skipping a fix on weak evidence",
+            )}。
+            """,
+            reads=["post_diagnosis_dedupe_json"],
+            writes=["existing_mrs_json", "source_manifest"],
+        ),
+        step(
+            "write_summary_and_payload",
+            "生成中文 summary.md、source-manifest.md 和业务专用 lark-card.json；卡片只放摘要、统计、代表异常、MR 和下一步，长详情留在本地 summary.md。",
+            reads=["groups_json", "dedupe_json", "post_diagnosis_dedupe_json", "existing_mrs_json"],
+            writes=["summary_report", "lark_card_json", "source_manifest"],
+        ),
+        step(
+            "dispatch_fixes",
+            f"""
+            full_auto 模式下，对 post-diagnosis-dedupe.json 中 status=bug 且未被强证据 MR 覆盖的代表项派发 SubAgent(high) 执行 fix-arms-exception；triage_only 模式必须跳过修复并记录原因。
+            使用 {call_subagent(
+                "arms-fix",
+                "run fix-arms-exception for one representative bug diagnosis and create a Yunxiao MR when fixable",
+                how="spawn high-effort fix Sub Agents with diagnostic_report, result_path, target, branch, representative_group_id, and covered_duplicate_group_ids; require TDD, review, MR creation when fixed, and a final report at result_path",
+                context="isolated fix context anchored at HOST_ROOT plus the diagnostic report and references/workflow.md fix brief",
+                effort="high",
+                result_path="HOST_ROOT/.arms-exceptions/triage/<run-id>/subagents/fix-<stable-slug>.md",
+                expect="fix result reports with status fixed | blocked | needs_human, branch, MR URL, verification, review result, risks, and Source Manifest",
+                on_failure="record blocked in summary/source-manifest; do not assume the MR exists or the fix succeeded",
+            )}。
+            """,
+            reads=["execution_mode", "post_diagnosis_dedupe_json", "existing_mrs_json"],
+            writes=["fix_results", "source_manifest"],
+            when="execution_mode is full_auto and at least one representative bug is not strongly covered by an MR",
+        ),
+        step(
+            "cleanup_fix_worktrees",
+            f"""
+            父 Agent 汇总 fix 结果后清理本次创建的 fix worktree；只允许清理 HOST_ROOT/.arms-exceptions/worktrees/ 下且能确认属于本次运行的路径。
+            使用 {call_tool(
+                "git",
+                how="run git -C \"$HOST_ROOT\" worktree remove \"$HOST_ROOT/.arms-exceptions/worktrees/fix-<stable-slug>\" for each completed fix worktree; never force-remove dirty, unrelated, or outside-root worktrees",
+                expect="cleanup result recorded for every fix worktree",
+                on_failure="leave the worktree in place and record path, reason, and suggested next command in summary/source-manifest",
+            )}。
+            """,
+            reads=["fix_results"],
+            writes=["source_manifest"],
+            when="fix worktrees were created",
+        ),
+        step(
+            "send_notification",
+            f"""
+            通过 lark-notify 发送 triage 生成的 raw card payload；lark-notify 只负责传输，不解析 ARMS 业务字段。
+            使用 {call_skill(
+                "lark-notify",
+                how="run send --json-file HOST_ROOT/.arms-exceptions/triage/<run-id>/lark-card.json --format raw after checking that the payload contains no credentials or signed URLs",
+                mode="compose",
+                expect="notification_result records sent, dry failure, missing webhook, or other masked error",
+                on_failure="keep summary.md and lark-card.json as durable local artifacts and report the masked send failure",
+            )}。
+            """,
+            reads=["lark_card_json"],
+            produces=["notification_result", "triage_artifacts"],
+        ),
+    ],
+    name="triage_run",
+)
 
-## Required Scope
+decision_rules([
+    when("target_or_service names a target", then="process all configured services under that target"),
+    when("target_or_service names a service", then="resolve it to exactly one target from targets --json; otherwise stop and ask the caller to pass target"),
+    when("target has no configured branch", then="stop as blocked and do not guess main/master/dev"),
+    when("execution_mode is triage_only or the caller explicitly says 只分诊", then="skip dispatch_fixes and record that repair was intentionally skipped"),
+    when("execution_mode is full_auto and representative item is status=bug and not strongly MR-covered", then="dispatch SubAgent(high) with fix-arms-exception"),
+    when("Sub Agent report omits required status, evidence, code path for bug, or output_path", then="mark blocked/needs_human or dispatch supplemental diagnosis before MR coverage or fix"),
+    when("trace_console_url is absent", then="show sample_trace_id and local show <group_id> --json command; never guess an Aliyun trace URL"),
+    prefer("HOST_ROOT/.arms-exceptions/triage/<run-id>/ for all durable artifacts", over="relative paths inside TRIAGE_WORKTREE_ROOT", reason="downstream agents need stable host-owned evidence paths"),
+    prefer("post-diagnosis dedupe before MR coverage and fix dispatch", over="fixing each original group_id independently", reason="diagnosis output is new evidence and may collapse duplicate bugs"),
+])
 
-先在宿主项目根目录执行：
+failure_modes([
+    when("doctor, targets, sync, groups, yunxiao-mr, or lark-notify fails with a user-fixable configuration problem", then="write blocked/needs_human with what happened, likely reason, and the next command to fix it"),
+    when("external API credentials or permissions are missing", then="do not print secrets; record the missing capability and notify using any available safe channel"),
+    when("Sub Agent cannot complete diagnosis or fix", then="preserve its report path, status, verification evidence, and open risks; do not invent missing evidence"),
+    when("cleanup cannot safely remove a worktree", then="keep the path and record the exact non-destructive cleanup recommendation"),
+])
 
-```bash
-python3 skills/arms-exceptions-explorer/scripts/cli.py doctor
-python3 skills/arms-exceptions-explorer/scripts/cli.py targets --json
+fallback_strategy(
+    [
+        when("TRIAGE_WORKTREE_ROOT cannot be created but read-only triage can safely run in HOST_ROOT", then="record the degraded cwd choice in source-manifest.md and continue only if it does not touch business code"),
+        when("Yunxiao MR coverage cannot be queried", then="treat coverage as unknown/maybe_related and do not skip a fix solely because MR data is unavailable"),
+        when("Lark notification cannot be sent", then="keep lark-card.json and summary.md locally, record the masked send failure, and return notification_result accordingly"),
+    ],
+    require_user_approval="when_destructive",
+)
+
+safety_policy(
+    must=[
+        "一次只处理一个 target；service 输入必须唯一反查 target，不得静默跨多个 target",
+        "父 Agent 只能协调、调度、聚合、判断和通知；不得亲自读取、搜索、分析或修改业务代码",
+        "异常详情、stacktrace、日志详情、代码路径、根因、修复方案和测试范围判断必须由诊断或修复 Sub Agent 完成",
+        "复聚合和 MR 覆盖判断只能使用 groups --json 元数据、Sub Agent 报告、post-diagnosis-dedupe.json 和 yunxiao-mr 输出",
+        "所有 Sub Agent brief 和持久产物必须包含可重读的 Source Manifest",
+        "summary.md、lark-card.json 和用户可见结论使用中文",
+    ],
+    must_not=[
+        "不要在诊断后复聚合完成前派发 fix-arms-exception",
+        "不要把 group_id 当作跨运行 MR 覆盖强证据",
+        "不要清理用户当前工作区、非 HOST_ROOT/.arms-exceptions/worktrees/ 路径或无法确认属于本次运行的 worktree",
+        "不要打印或提交 AccessKey、Secret、Token、SecurityToken、OAuth code、Authorization header、签名 URL 或完整 webhook",
+        "不要让 lark-notify 承担 ARMS 字段解释；业务卡片由 triage 生成 raw payload",
+    ],
+    approval_required=[
+        "跨多个 target 执行",
+        "强制删除 dirty worktree 或 HOST_ROOT/.arms-exceptions/worktrees/ 之外的路径",
+        "改变 full_auto/triage_only 之外的修复派发策略",
+    ],
+)
+
+quality_bar(
+    must=[
+        "target/service、services、branch、window、HOST_ROOT、TRIAGE_WORKTREE_ROOT 和 run_id 明确记录",
+        "source-manifest.md 记录 Sources、Produced artifacts、Key decisions、Verification evidence 和 Open questions / risks",
+        "diagnostic Sub Agent brief 和 fix Sub Agent brief 不依赖聊天上下文即可执行",
+        "post-diagnosis-dedupe.json 记录代表项、合并项、合并原因、诊断报告路径和是否进入 MR 覆盖/修复",
+        "existing-mrs.json 区分 covered、maybe_related 和 not_related，并保留证据",
+        "summary.md 展示复聚合前后数量、代表异常、重复项、MR、修复结果、证据路径和剩余风险",
+        "lark-card.json 不含凭证或签名 URL，且长详情留在本地 summary.md",
+    ],
+    should=[
+        "父 Agent 自行决定 Sub Agent 并发，并在 source-manifest.md 记录调度理由",
+        "blocked/needs_human 结论包含发生了什么、为什么可能发生、下一步怎么修复",
+        "可修 bug 的 fix result 包含 TDD、review、MR URL 和未解决风险",
+    ],
+    must_not=[
+        "不得用父 Agent 猜测补足 Sub Agent 未提供的根因、代码路径或测试建议",
+        "不得把初筛没有合并的 group 直接视为不同 bug",
+        "不得因为 maybe_related 或查询失败跳过明确 bug 的修复派发",
+    ],
+)
+
+validation(
+    [
+        check("scope_unique", "target_or_service 已解析到单个 target，且 target.branch 来自 .arms-exceptions/config.json 或 targets --json。"),
+        check("artifacts_host_owned", "所有 triage 产物位于 HOST_ROOT/.arms-exceptions/triage/<run-id>/，worktree 位于 HOST_ROOT/.arms-exceptions/worktrees/。"),
+        check("parent_boundary_preserved", "父 Agent 没有打开、搜索、阅读或修改业务代码，也没有亲自调用 show/logs 做异常详情探索。"),
+        check("source_manifest_complete", "summary、Sub Agent 报告和持久产物包含 Source Manifest 五个章节。"),
+        check("post_diagnosis_before_fix", "fix-arms-exception 派发发生在 post-diagnosis-dedupe.json 生成和 MR 覆盖判断之后。"),
+        check("secret_redaction", "summary.md、lark-card.json、source-manifest.md、Sub Agent 报告和最终回复不包含凭证、Authorization header、签名 URL 或完整 webhook。"),
+        check("notification_or_local_payload", "lark-notify 成功发送，或 notification_result 记录无法发送原因并保留 lark-card.json 路径。"),
+    ],
+    on_failure="report",
+)
+
+examples([
+    example(
+        user="分诊 ai-service-dev 最近 2 小时 ARMS 异常",
+        expected_behavior="解析 ai-service-dev 为单个 target，默认 full_auto：sync、groups、初筛 dedupe、派发诊断、诊断后复聚合、MR 覆盖判断、对明确且未覆盖 bug 派发 fix-arms-exception，最后生成 summary/source-manifest/lark-card 并发送通知。",
+        output="triage_artifacts",
+    ),
+    example(
+        user="只分诊 ai-service-dev-celery-worker，不要修",
+        expected_behavior="选择 triage_only：完成 sync、groups、dedupe、诊断、post-diagnosis dedupe、MR 覆盖和中文 summary，但跳过 fix SubAgent(high)，并在 summary/source-manifest 记录用户显式跳过修复。",
+        output="summary_report",
+    ),
+    example(
+        user="处理 service=api-worker 的 ARMS 异常",
+        expected_behavior="先用 targets --json 唯一反查 service 所属 target；如果不能唯一定位，停止并要求改传 target，不跨多个 target 猜测执行。",
+        output="summary_report",
+    ),
+])
 ```
-
-规则：
-
-- 输入 `target` 时，处理该 target 下所有 services。
-- 输入 `service` 时，从 `targets --json` 唯一定位所属 target；不能唯一定位就停止并要求改传 target。
-- target 必须配置 `branch`；没有 branch 时停止，不猜 `main/master/dev`。
-- 不要静默跨多个 target。
-
-## Artifacts
-
-路径约定：
-
-- `HOST_ROOT`：触发 triage 的宿主项目根目录。
-- `TRIAGE_WORKTREE_ROOT`：父 Agent 为本次运行创建的独立 worktree。
-- 无论当前 shell 是否切到 worktree，所有 triage 产物都写入 `HOST_ROOT/.arms-exceptions/triage/<run-id>/`。
-
-每次运行在宿主项目写本地产物：
-
-```text
-.arms-exceptions/triage/<YYYYMMDDTHHMMSS>-<target-or-service>/
-  summary.md
-  source-manifest.md
-  groups.json
-  dedupe.json
-  post-diagnosis-dedupe.json
-  existing-mrs.json
-  lark-card.json
-  subagents/
-    diagnose-<stable-slug>.md
-    fix-<stable-slug>.md
-```
-
-确认宿主项目 `.gitignore` 或 `.arms-exceptions/.gitignore` 包含：
-
-```text
-.arms-exceptions/triage/
-.arms-exceptions/worktrees/
-```
-
-`source-manifest.md` 必须记录 sources、产物、关键决策、验证证据和未决风险。
-
-所有 triage/fix worktree 统一放在宿主项目：
-
-```text
-.arms-exceptions/worktrees/
-```
-
-诊断模板、Sub Agent 派发输入、MR 匹配细节和 summary 建议见 `references/workflow.md`。
-
-## Workflow
-
-```mermaid
-flowchart TD
-  A["解析 target/service"] --> B["读取 targets --json 和 branch"]
-  B --> C["创建 .arms-exceptions/worktrees/ 独立 worktree"]
-  C --> D["sync 异常"]
-  D --> E["groups 保存 groups.json"]
-  E --> F["父 Agent 二次聚合 dedupe.json"]
-  F --> G["Medium SubAgent 获取异常详情并深度诊断"]
-  G --> H["父 Agent 诊断后复聚合 post-diagnosis-dedupe.json"]
-  H --> I["Yunxiao MR 覆盖判断"]
-  I --> J["汇总 summary/source-manifest"]
-  J --> K{"status=bug 且未 covered?"}
-  K -- "yes" --> L["SubAgent(high) 执行 fix-arms-exception"]
-  K -- "no" --> M["跳过修复并记录原因"]
-  L --> N["清理 fix 子 Agent worktree"]
-  M --> O["lark-notify 发送报告"]
-  N --> O
-```
-
-1. 解析 target/service，记录 target、services、branch、窗口。
-2. 记录 `HOST_ROOT` 和 `run-id`，创建 `HOST_ROOT/.arms-exceptions/triage/<run-id>/`。
-3. 优先从 target.branch 创建或切换到 `HOST_ROOT/.arms-exceptions/worktrees/triage-<run-id>/` 独立 worktree，避免干扰用户当前工作区。
-4. 在 `TRIAGE_WORKTREE_ROOT` 执行 `arms-exceptions-explorer sync --target <target> --json` 或 `sync --service <service> --json` 同步异常。
-5. 在 `TRIAGE_WORKTREE_ROOT` 执行 `groups --target <target> --json` 或 `groups --service <service> --json`，把输出保存到 `HOST_ROOT/.arms-exceptions/triage/<run-id>/groups.json`。
-
-6. 父 Agent 做二次聚合、去重和初筛，保存 `dedupe.json`。`group_id` 只作为本次运行内定位，不能作为跨运行强证据。
-7. 对保留的异常组派发 medium-effort Sub Agent 深度诊断；派发输入必须包含 `HOST_ROOT`、`TRIAGE_WORKTREE_ROOT`、target、services、branch、group_id、查看命令和输出路径 `subagents/diagnose-<stable-slug>.md`。
-8. 父 Agent 收集所有诊断报告后必须做诊断后复聚合，保存 `post-diagnosis-dedupe.json`。复聚合要按根因、代码路径、异常指纹、修复建议和 Sub Agent 证据重新判断重复 bug，避免多个不同 `group_id` 或初筛代表组重复派发同一修复。
-9. 只有复聚合后的代表项进入 MR 覆盖判断。被合并的重复项必须记录代表项、被合并项、合并原因和对应诊断报告路径。
-10. 使用 `yunxiao-mr list --state opened --json` 和必要的 merged/search 查询，判断是否已有 MR 覆盖。
-11. 汇总诊断和复聚合结果到 `summary.md`。
-12. 对复聚合后的 `status=bug` 且未被强证据 MR 覆盖的代表项，派发 SubAgent(high) 执行 `fix-arms-exception`；派发输入必须包含诊断报告路径和结果输出路径 `subagents/fix-<stable-slug>.md`。
-13. 父 Agent 收集 fix 子 Agent 的 MR/失败结果后，清理对应 `HOST_ROOT/.arms-exceptions/worktrees/fix-*` worktree，并在 `source-manifest.md` 记录清理结果；清理失败时保留路径和原因。
-14. 生成业务专用飞书卡片 payload 到 `lark-card.json`，再调用 `lark-notify send --json-file .arms-exceptions/triage/<run-id>/lark-card.json --format raw` 发送报告。
-
-## Rules
-
-- Sub Agent 并发不固定；父 Agent 自行决定并记录调度理由。
-- 父 Agent 只能协调和判断，不得读取、搜索、修改业务代码，不得亲自做异常详情和根因探索。
-- 父 Agent 可以读取 Sub Agent 报告中的结构化证据、代码路径、根因、修复建议和测试建议；不得自行补充这些证据。
-- 业务代码探索、异常详情读取、代码编辑和测试必须由对应 Sub Agent 完成。
-- Sub Agent 没有写入约定输出路径、报告缺必填证据或状态不明确时，父 Agent 必须记录 blocked/needs_human 或派发补充诊断，不得继续假设。
-- 不允许在诊断后复聚合完成前派发 `fix-arms-exception`；否则同一根因可能被多个 fix 子 Agent 重复修复。
-- fix 子 Agent 的 worktree 必须由父 Agent 在汇总后清理；不得清理用户当前工作区或非 `HOST_ROOT/.arms-exceptions/worktrees/` 路径。
-- 详细异常内容可以写进报告和飞书通知，但永远不要包含凭证、Authorization header、AccessKey、Token、SecurityToken、签名 URL 或 OAuth code。
-- `summary.md` 和 `lark-card.json` 必须面向中文读者；飞书通知使用 triage 自己生成的 raw card payload，不要求 `lark-notify` 理解 ARMS 字段。
-- 每个保留/代表异常 group 必须包含 `group` 和 `sample_trace_id`；`trace_console_url` 只能使用 `arms-exceptions-explorer groups/show --json` 产出的字段，缺失时不要猜链接，改为展示 trace_id 和本地查看命令。
-- 默认面向 CI 自动完整执行；无法继续时写入 blocked/needs_human、发送通知并以失败状态退出。
-- 深度诊断、MR 覆盖判断和 summary 格式不足时读取 `references/workflow.md`。
-
-## References
-
-更多诊断模板、MR 匹配和 summary 细节见 `references/workflow.md`。
