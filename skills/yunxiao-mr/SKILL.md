@@ -8,9 +8,7 @@ from skill_contract import *
 
 skill(
     name="yunxiao-mr",
-    purpose="通过随 skill 分发的 CLI 管理阿里云云效 Codeup 合并请求。",
-    summary="在宿主项目根目录使用 yunxiao-mr CLI 完成 MR 管理操作，并保持凭证和写操作边界清晰。",
-    version="0.1.0",
+    purpose="通过随 skill 分发的 CLI 管理阿里云云效 Codeup 合并请求，并保持凭证和真实写操作边界清晰。",
 )
 
 activate_when(
@@ -21,7 +19,6 @@ activate_when(
         "用户提到 yunxiao-mr、Codeup MR、云效合并请求或云效类标管理",
     ],
     match="any",
-    strength="strong",
 )
 
 do_not_activate_when([
@@ -74,7 +71,6 @@ resources(
     scripts=[
         script(
             "scripts/cli.py",
-            purpose="管理云效 Codeup MR 的主 CLI。",
             when="执行任何云效 MR 检查、读取或写入操作时",
             interface="python3 skills/yunxiao-mr/scripts/cli.py <command> [options]",
             run_help_first=True,
@@ -86,7 +82,6 @@ resources(
     references=[
         reference(
             "references/cli.md",
-            purpose="完整 CLI 命令、参数、输出字段和 JSON 约定。",
             when="构造 yunxiao-mr 命令或确认输出字段时",
             read_strategy="on_demand",
         ),
@@ -99,22 +94,12 @@ environment(
             "YUNXIAO_ACCESS_TOKEN",
             required=False,
             secret=True,
-            purpose="云效 API token；只从环境变量读取，不写入配置、日志、报告或测试产物。",
+            when="执行需要云效 API 的 doctor、读取或写入操作时；只从环境变量读取，不写入配置、日志、报告或测试产物。",
         ),
     ],
     commands=["python3", "git", "bash"],
     network="required",
     filesystem="workspace",
-)
-
-tools(
-    required=["python3", "git"],
-    preferred=["rg"],
-    forbidden=[
-        "printing or saving YUNXIAO_ACCESS_TOKEN",
-        "merging a real MR without explicit user request",
-        "destructive git commands",
-    ],
 )
 
 workflow(
@@ -163,13 +148,13 @@ workflow(
             )}。
             """,
             reads=["prepared_command", "planned_command"],
-            produces=["operation_result"],
+            writes=["operation_result"],
         ),
         step(
             "summarize_result",
             "向用户总结 localId、status、detailUrl/webUrl、类标变化、评论/关闭/重开/合并结果和下一步；涉及生产或真实业务数据时只保留必要证据。",
             reads=["operation_result", "doctor_result"],
-            produces=["operation_result", "mr_url", "next_steps"],
+            writes=["operation_result", "mr_url", "next_steps"],
         ),
     ],
     name="manage_yunxiao_mr",
@@ -184,40 +169,19 @@ decision_rules([
     when("label add 或 label remove", then="先读取现有 MR 类标，再覆盖式重写完整类标 ID 列表，避免删除无关类标"),
     when("label add 找不到类标", then="默认失败并提示 label create <name>；只有用户明确允许时使用 --create-missing-label"),
     when("merge 被要求执行", then="先读取 MR 详情并检查可见冲突或卡点；只有用户明确要求时才 merge"),
-    prefer("--json", over="human table output", reason="下游 Agent 需要稳定字段或要继续自动化分析时更可靠"),
-    prefer("--body-file", over="--body", reason="长 MR 描述和评论更易审查，也避免 shell quoting 问题"),
+    when("下游 Agent 需要稳定字段或继续自动化分析", then="优先使用 --json 而不是人类表格输出"),
+    when("正文或评论较长", then="优先使用 --body-file，避免 shell quoting 问题"),
+    when("CLI 失败", then="保留脱敏 stderr、exit code 和 CLI 下一步，不猜测 token 或仓库 ID"),
+    when("云效返回权限、仓库身份或类标错误", then="停止写操作并让用户按 CLI 下一步修正环境或权限"),
 ])
-
-fallback_strategy(
-    [
-        when("CLI 失败", then="保留脱敏 stderr、exit code 和 CLI 下一步，不猜测 token 或仓库 ID"),
-        when("云效返回权限、仓库身份或类标错误", then="停止写操作并让用户按 CLI 下一步修正环境或权限"),
-    ],
-    require_user_approval="when_destructive",
-)
-
-safety_policy(
-    must=[
-        "所有命令默认从宿主项目根目录执行：python3 skills/yunxiao-mr/scripts/cli.py <command>",
-        "YUNXIAO_ACCESS_TOKEN 只从环境变量读取，任何输出、报告、日志和测试产物都必须脱敏",
-        ".arms-exceptions/yunxiao.json 只能保存 domain、api_domain、organization_id、repository_identity、repository_id、default_target_branch 等非凭证缓存",
-        "stdout 用于成功结果，stderr 用于错误、告警和需要用户处理的信息",
-    ],
-    must_not=[
-        "不要索要、打印、提交或保存 token、AccessKey、SecurityToken、Authorization header、签名 URL 或 OAuth code",
-        "不要自动 push 分支；未推送时只提示 git push -u origin <branch>",
-        "不要自动合并 MR；只有用户明确要求 merge 时才执行",
-        "不要让 label add/remove 只传新增或删除的单个类标 ID",
-    ],
-    approval_required=[
-        "对真实云效仓库执行写操作，除非用户当前请求已经明确指定该操作",
-        "合并真实 MR 或使用 --delete-branch",
-    ],
-)
 
 quality_bar(
     must=[
         "先运行 doctor，再执行任何云效 MR 读取或写入操作",
+        "所有命令默认从宿主项目根目录执行：python3 skills/yunxiao-mr/scripts/cli.py <command>",
+        "YUNXIAO_ACCESS_TOKEN 只从环境变量读取，任何输出、报告、日志和测试产物都必须脱敏",
+        ".arms-exceptions/yunxiao.json 只能保存 domain、api_domain、organization_id、repository_identity、repository_id、default_target_branch 等非凭证缓存",
+        "stdout 用于成功结果，stderr 用于错误、告警和需要用户处理的信息",
         "命令失败时说明发生了什么、为什么可能发生、下一步怎么修复",
         "结构化结果使用 --json，字段名保持稳定且不包含凭证",
         "创建 MR 时确认分支已推送，MR URL 优先使用 detailUrl",
@@ -233,6 +197,10 @@ quality_bar(
         "不要把历史计划或旧文档当作当前 CLI 行为权威",
         "不要在用户只要求查看或诊断时执行写操作",
         "不要绕过官方凭证链或把凭证写入项目配置",
+        "不要索要、打印、提交或保存 token、AccessKey、SecurityToken、Authorization header、签名 URL 或 OAuth code",
+        "不要自动 push 分支；未推送时只提示 git push -u origin <branch>",
+        "不要自动合并 MR；只有用户明确要求 merge 时才执行",
+        "不要让 label add/remove 只传新增或删除的单个类标 ID",
     ],
 )
 ```

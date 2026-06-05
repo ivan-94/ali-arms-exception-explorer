@@ -59,9 +59,11 @@ skills/yunxiao-mr/scripts/test_*.py
 
 ```text
 skills/arms-exceptions-triage/SKILL.md
-skills/arms-exceptions-triage/references/workflow.md
+skills/arms-exceptions-triage/references/dedupe.md
+skills/arms-exceptions-triage/references/mr-coverage.md
+skills/arms-exceptions-triage/references/templates/
 skills/fix-arms-exception/SKILL.md
-skills/fix-arms-exception/references/workflow.md
+skills/fix-arms-exception/references/templates/
 ```
 
 当前 `lark-notify` 使用：
@@ -77,13 +79,17 @@ skills/lark-notify/scripts/test_*.py
 
 ```text
 skills/setup-arms-workflow/SKILL.md
-skills/setup-arms-workflow/references/workflow.md
+skills/setup-arms-workflow/references/commands.md
+skills/setup-arms-workflow/references/checklist.md
+skills/setup-arms-workflow/references/ignore-rules.md
+skills/setup-arms-workflow/references/templates/
 ```
 
 ## Skill Guidelines
 
 - `SKILL.md` 面向 Agent，写最短可执行流程、触发条件、关键规则和必要入口；不要堆入长篇背景。
 - 复杂参数、配置格式、JSON schema、故障排查细节放到 `references/`，并在 `SKILL.md` 里说明何时读取。
+- 编排型 skill 的 `SKILL.md` 是流程契约权威；不要在 `references/` 里重复维护完整 workflow。可复制报告、brief、payload 和配置片段优先放到 `references/templates/`。
 - `scripts/` 放可执行代码和测试，优先让 Agent 运行脚本而不是重写大段逻辑。
 - README 面向人类用户，解释安装、能力、安全模型和常用命令。
 - 新增或修改 skill 行为时，同步检查 README、`SKILL.md`、相关 reference 和测试是否仍一致。

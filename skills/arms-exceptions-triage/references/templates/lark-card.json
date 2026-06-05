@@ -1,0 +1,34 @@
+{
+  "msg_type": "interactive",
+  "card": {
+    "config": {
+      "wide_screen_mode": true
+    },
+    "header": {
+      "template": "blue",
+      "title": {
+        "tag": "plain_text",
+        "content": "ARMS 异常分诊：<target>"
+      }
+    },
+    "elements": [
+      {
+        "tag": "div",
+        "text": {
+          "tag": "lark_md",
+          "content": "**结论**\n状态：<ready|blocked|fixed|needs_human>\n目标：<target>\n分支：<branch>"
+        }
+      },
+      {
+        "tag": "hr"
+      },
+      {
+        "tag": "div",
+        "text": {
+          "tag": "lark_md",
+          "content": "**修复项**\n<short_title>\n异常组：<group_id>\nTrace：<sample_trace_id>\n[查看调用链](<trace_console_url>)"
+        }
+      }
+    ]
+  }
+}

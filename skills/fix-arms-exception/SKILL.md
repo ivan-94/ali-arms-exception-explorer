@@ -9,8 +9,6 @@ from skill_contract import *
 skill(
     name="fix-arms-exception",
     purpose="从 status=bug 的 ARMS 诊断报告出发，在隔离 worktree 中用 TDD 修复异常，经独立 review 后 push fix/arms- 分支并创建 Yunxiao MR。",
-    summary="只处理 arms-exceptions-triage 已确认的可修复 bug；不能从裸 group_id、截图、日志片段或口头摘要直接开始。",
-    version="0.1.0",
 )
 
 activate_when(
@@ -20,7 +18,6 @@ activate_when(
         "输入是 .arms-exceptions/triage/<run-id>/subagents/diagnose-<stable-slug>.md 这类诊断报告",
     ],
     match="any",
-    strength="strong",
 )
 
 do_not_activate_when([
@@ -59,6 +56,14 @@ outputs(
             "repair_result",
             type=Text,
             description="最终修复结果摘要。",
+            required_sections=[
+                "状态",
+                "分支和 MR",
+                "变更摘要",
+                "验证",
+                "风险",
+                "Source Manifest",
+            ],
             success_criteria=[
                 "包含 status: fixed | blocked | needs_human",
                 "包含 worktree、branch、commit、MR、变更摘要、验证命令和结果、风险、Source Manifest 更新建议",
@@ -83,10 +88,19 @@ outputs(
 resources(
     references=[
         reference(
-            "references/workflow.md",
-            purpose="MR 正文模板、修复前检查、分支和 push 规则、review Sub Agent brief、失败处理和最终总结模板。",
-            when="开始修复前、准备 MR 正文、处理失败或写最终总结时读取。",
-            read_strategy="always",
+            "references/templates/mr-body.md",
+            when="准备 MR 正文时读取。",
+            read_strategy="on_demand",
+        ),
+        reference(
+            "references/templates/review-brief.md",
+            when="派发 review Sub Agent 时读取。",
+            read_strategy="on_demand",
+        ),
+        reference(
+            "references/templates/repair-result.md",
+            when="写最终总结或父 Agent 提供 result_path 时读取。",
+            read_strategy="on_demand",
         ),
     ],
 )
@@ -97,7 +111,7 @@ environment(
             "YUNXIAO_ACCESS_TOKEN",
             required=False,
             secret=True,
-            purpose="yunxiao-mr CLI 从环境变量读取的访问令牌；不得写入配置、日志或报告。",
+            when="创建 Yunxiao MR 时由 yunxiao-mr CLI 从环境变量读取；不得写入配置、日志或报告。",
         ),
     ],
     commands=["git", "python3"],
@@ -153,7 +167,7 @@ workflow(
         ),
         step(
             "draft_mr_body",
-            "按 references/workflow.md 的 MR 正文模板起草 MR 描述，保留问题、归因、方案、验证、风险回滚、ARMS 证据和 Source Manifest；不要粘贴大段 raw span 或 raw logs。",
+            "按 references/templates/mr-body.md 起草 MR 描述，保留问题、归因、方案、验证、风险回滚、ARMS 证据和 Source Manifest；不要粘贴大段 raw span 或 raw logs。",
             reads=["report_contract", "source_manifest", "verification_evidence", "fix_diff"],
             writes=["mr_body_draft"],
         ),
@@ -161,9 +175,12 @@ workflow(
             "run_review_subagent",
             f"""
             测试通过后、提交和 push 前，派发独立只读 review Sub Agent 审查修复 diff、测试证据和 MR 正文草稿。
-            使用 {call_tool(
-                "review Sub Agent",
+            使用 {call_subagent(
+                "arms-fix-review",
+                "审查 ARMS 异常修复 diff、测试证据和 MR 正文草稿",
                 how="提供诊断报告路径、目标分支、修复分支、diff 摘要、测试命令和结果、MR 正文草稿路径，并要求按 P0/P1/P2 输出发现；review agent 只读 fix_worktree，不修改文件",
+                context="只传 diagnostic_report、fix diff、测试证据、MR 正文草稿和 references/templates/review-brief.md",
+                effort="medium",
                 expect="按 P0/P1/P2 分级的审查结果",
                 on_failure="记录 review 缺口并停止，除非调用方明确接受跳过独立审查",
             )}。
@@ -205,7 +222,7 @@ workflow(
             "write_repair_result",
             "输出最终 repair_result；当 result_path 存在时必须写入该文件，即使状态是 blocked 或 needs_human。不要自行删除 fix_worktree，父 Agent 读取结果后再按 HOST_ROOT 清理。",
             reads=["fix_context", "fix_branch", "fix_commit", "yunxiao_mr", "verification_evidence", "source_manifest"],
-            produces=["repair_result", "result_artifact", "yunxiao_mr"],
+            writes=["repair_result", "result_artifact", "yunxiao_mr"],
         ),
     ],
     name="fix_bug_from_triage_report",
@@ -220,29 +237,19 @@ decision_rules([
     when("测试失败或无法生成可信回归测试", then="不创建 MR；把失败证据写入 repair_result"),
     when("review Sub Agent 返回 P0/P1", then="回到实现步骤修正并重新测试和 review"),
     when("Yunxiao MR 创建失败", then="保留本地 commit 和 pushed branch 信息，并按 yunxiao-mr 输出记录下一步"),
-    prefer("当前诊断报告和 Source Manifest", over="聊天摘要或旧设计文档", reason="父 Agent 和下游 Agent 需要能重读原始来源"),
-    prefer("focused regression test first", over="直接实现修复", reason="这个 skill 的修复证据必须能证明异常不会回归"),
-])
-
-failure_modes([
     when("required input missing", then="只询问缺失的 diagnostic_report；result_path 仅在父 Agent 派发时必填"),
     when("Source Manifest missing", then="停止并要求补齐诊断报告，不从聊天上下文补造来源清单"),
     when("worktree creation fails", then="记录目标分支、候选路径、失败原因和下一步，不修改当前工作区"),
     when("focused test unavailable", then="记录无法运行原因，并运行诊断报告建议的最接近相关测试；如果没有可信测试则 needs_human"),
     when("push fails", then="不创建 MR，记录 git push -u origin <branch> 命令和失败原因"),
     when("MR creation fails", then="不猜凭证或 repository_id，记录 yunxiao-mr CLI 给出的修复命令或下一步"),
+    when("需要在来源之间取舍", then="以当前诊断报告和 Source Manifest 为准，不使用聊天摘要或旧设计文档补造证据"),
+    when("无法直接复现异常但诊断证据足以证明根因", then="写覆盖根因的回归测试，并在 MR 正文中说明复现限制"),
+    when("同名分支确认为其他运行所有", then="创建带短后缀的新 fix/arms- 分支和 worktree"),
+    when("review Sub Agent 不可用", then="停止并报告独立审查缺口；只有调用方明确接受风险后才可继续"),
 ])
 
-fallback_strategy(
-    [
-        when("无法直接复现异常但诊断证据足以证明根因", then="写覆盖根因的回归测试，并在 MR 正文中说明复现限制"),
-        when("同名分支确认为其他运行所有", then="创建带短后缀的新 fix/arms- 分支和 worktree"),
-        when("review Sub Agent 不可用", then="停止并报告独立审查缺口；只有调用方明确接受风险后才可继续"),
-    ],
-    require_user_approval="when_destructive",
-)
-
-safety_policy(
+quality_bar(
     must=[
         "只从 status=bug 诊断报告开始修复",
         "在独立 fix worktree 中修改文件，不修改用户当前工作区",
@@ -250,24 +257,8 @@ safety_policy(
         "由 arms-exceptions-triage 调度时，即使 blocked 或 needs_human，也必须写入 result_path",
         "最终总结必须返回 worktree 路径，供父 Agent 汇总后清理",
         "MR 正文和最终总结必须保留 Source Manifest 结构",
-    ],
-    must_not=[
-        "不要从裸 group_id、截图、日志片段或口头摘要直接开始修复",
-        "不要自动合并 MR",
-        "不要 push 目标分支、用户当前分支或任何非 fix/arms- 分支",
-        "不要在测试失败、review 未通过或证据不足时创建 MR",
-        "不要自行删除 fix worktree",
-        "不要打印、保存或发送凭证、Authorization header、AccessKey、Token、SecurityToken、签名 URL 或 OAuth code",
-    ],
-    approval_required=[
-        "外部权限、数据迁移、发布动作、跨仓库变更或产品判断",
-        "跳过独立 review Sub Agent 后继续创建 MR",
-        "任何会影响非 fix/arms- 分支的 git 操作",
-    ],
-)
-
-quality_bar(
-    must=[
+        "实现修复前先写或确认 focused regression test；无法直接复现时说明证据依据",
+        "创建 MR 前 focused test、必要相关测试和独立 review Sub Agent 均通过，且没有未解决 P0/P1",
         "repair_result 明确 status: fixed | blocked | needs_human",
         "fixed 结果必须包含 fix branch、worktree、commit、Yunxiao MR localId 和详情页 URL",
         "blocked 或 needs_human 必须包含阻塞原因、已执行验证和可执行下一步",
@@ -283,33 +274,13 @@ quality_bar(
     must_not=[
         "不要把聊天上下文当成唯一来源",
         "不要把未验证的外部控制台链接或凭证路径写入报告",
+        "不要从裸 group_id、截图、日志片段或口头摘要直接开始修复",
+        "不要自动合并 MR",
+        "不要 push 目标分支、用户当前分支或任何非 fix/arms- 分支",
+        "不要在测试失败、review 未通过或证据不足时创建 MR",
+        "不要自行删除 fix worktree",
+        "不要打印、保存或发送凭证、Authorization header、AccessKey、Token、SecurityToken、签名 URL 或 OAuth code",
     ],
-)
-
-output_format(
-    name="repair_result",
-    required_sections=[
-        "状态",
-        "分支和 MR",
-        "变更摘要",
-        "验证",
-        "风险",
-        "Source Manifest",
-    ],
-)
-
-validation(
-    [
-        check("diagnostic_report_contract_valid", "诊断报告为 status=bug，且包含异常指纹、证据、根因、建议修复范围、建议测试和 Source Manifest。"),
-        check("isolated_worktree_only", "所有文件修改都发生在 .arms-exceptions/worktrees/fix-<stable-slug>/ 对应 worktree。"),
-        check("regression_test_first", "实现修复前已新增或确认失败回归测试；无法复现时已说明证据依据。"),
-        check("verification_passed_before_mr", "创建 MR 前 focused test 和必要相关测试已通过。"),
-        check("review_gate_passed", "独立 review Sub Agent 已完成，且没有未解决 P0/P1。"),
-        check("push_scope_valid", "push 目标只可能是 fix/arms- 分支。"),
-        check("result_path_written_when_provided", "父 Agent 提供 result_path 时，fixed、blocked、needs_human 都会写入该文件。"),
-        check("secrets_not_exposed", "最终总结、MR 正文、日志摘要和错误信息不包含凭证、完整签名 URL 或鉴权头。"),
-    ],
-    on_failure="report",
 )
 
 examples([

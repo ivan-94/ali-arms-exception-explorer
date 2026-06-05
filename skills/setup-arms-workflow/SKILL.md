@@ -8,9 +8,7 @@ from skill_contract import *
 
 skill(
     name="setup-arms-workflow",
-    purpose="在宿主项目完成 ARMS 异常分诊和修复工作流的本地配置、验证和 setup 证据归档。",
-    summary="编排 arms-exceptions-explorer、arms-exceptions-triage、fix-arms-exception、yunxiao-mr 和 lark-notify；不新增 setup CLI，不自动创建 MR，不发送真实飞书通知，不运行 ARMS sync。",
-    version="0.1.0",
+    purpose="在宿主项目完成 ARMS 异常分诊和修复工作流的本地配置、验证和 setup 证据归档；只编排现有 skills 和脚本。",
 )
 
 activate_when(
@@ -21,7 +19,6 @@ activate_when(
         "用户要求生成 .arms-exceptions/setup/ 下的 setup 报告和 Source Manifest",
     ],
     match="any",
-    strength="strong",
 )
 
 do_not_activate_when([
@@ -99,6 +96,12 @@ outputs(
             "ready_or_blocked_summary",
             type=Text,
             description="最终面向用户的 ready 或 blocked 结论、证据和下一步命令。",
+            required_sections=[
+                "状态：ready 或 blocked",
+                "已验证",
+                "报告路径",
+                "下一步",
+            ],
             success_criteria=[
                 "只有全部配置验证通过才输出 ready",
                 "权限、账号、secret 注入或用户拒绝无法在当前会话解决时输出 blocked",
@@ -115,18 +118,42 @@ outputs(
 resources(
     references=[
         reference(
-            "references/workflow.md",
-            purpose="setup 报告模板、Source Manifest 模板、命令清单、失败处理和最终检查表。",
-            when="执行 setup、续跑 setup、处理失败或生成报告时",
-            read_strategy="always",
+            "references/templates/source-manifest.md",
+            when="初始化或写入 .arms-exceptions/setup/source-manifest.md 时",
+            read_strategy="on_demand",
+        ),
+        reference(
+            "references/templates/setup-report.md",
+            when="写入 .arms-exceptions/setup/setup-report.md 时",
+            read_strategy="on_demand",
+        ),
+        reference(
+            "references/templates/host-agent-instructions.md",
+            when="生成 setup-report.md 的 Suggested Host Agent Instructions 时",
+            read_strategy="on_demand",
+        ),
+        reference(
+            "references/commands.md",
+            when="执行具体检查命令、引导用户修复外部配置或记录命令证据时",
+            read_strategy="on_demand",
+        ),
+        reference(
+            "references/ignore-rules.md",
+            when="检查或更新本地忽略规则时",
+            read_strategy="on_demand",
+        ),
+        reference(
+            "references/checklist.md",
+            when="验证 setup 是否 ready 或 blocked 时",
+            read_strategy="on_demand",
         ),
     ],
 )
 
 environment(
     variables=[
-        env("YUNXIAO_ACCESS_TOKEN", required=False, secret=True, purpose="云效 API doctor 和后续 MR 创建能力验证；只从环境变量读取，不保存。"),
-        env("ARMS_LARK_WEBHOOK_URL", required=False, secret=True, purpose="飞书 webhook 的可选环境变量来源；输出必须脱敏。"),
+        env("YUNXIAO_ACCESS_TOKEN", required=False, secret=True, when="运行 Yunxiao API doctor 时；只从环境变量读取，不保存。"),
+        env("ARMS_LARK_WEBHOOK_URL", required=False, secret=True, when="检查飞书 webhook 配置时；输出必须脱敏。"),
     ],
     commands=["python3", "git"],
     network="required",
@@ -252,14 +279,14 @@ workflow(
         ),
         step(
             "write_final_reports",
-            "按 references/workflow.md 模板写入 setup-report.md 和 source-manifest.md；Source Manifest 必须记录命令、用户决定、产物路径、闭环项、阻塞项和风险。",
+            "按 references/templates/setup-report.md 和 references/templates/source-manifest.md 写入 setup-report.md 与 source-manifest.md；Source Manifest 必须记录命令、用户决定、产物路径、闭环项、阻塞项和风险。",
             reads=["setup_artifacts", "source_manifest", "ready_or_blocked_summary"],
-            produces=["setup_report", "source_manifest"],
+            writes=["setup_report", "source_manifest"],
         ),
         step(
             "respond_to_user",
             "最终回复必须直接给出 ready 或 blocked、关键验证证据、报告路径和用户下一步；不能只让用户去看 setup-report.md。",
-            produces=["ready_or_blocked_summary"],
+            writes=["ready_or_blocked_summary"],
         ),
     ],
     name="setup_arms_workflow",
@@ -273,29 +300,20 @@ decision_rules([
     when("Yunxiao skip-api doctor 因 remote 不可推断失败", then="记录 stderr/exit code 并引导配置 Codeup remote；无法补齐时 blocked"),
     when("缺少 YUNXIAO_ACCESS_TOKEN 或 Lark webhook", then="在当前对话给出配置命令并等待用户补齐；无法补齐时 blocked"),
     when("所有 ARMS、Yunxiao、Lark、triage/fix 前置验证都通过", then="输出 ready", else_="输出 blocked 并列出下一步"),
-    prefer("现场引导用户补齐并重跑验证", over="只把缺失项写进 setup-report.md", reason="setup 目标是闭环可运行配置，报告只是证据归档"),
-    prefer("只读发现命令", over="写配置命令", reason="ARMS app、target、branch、service 和 SLS 选择必须先由用户确认"),
-])
-
-failure_modes([
     when("找不到 aliyun 或未鉴权", then="引导用户安装/配置阿里云 CLI 或 OAuth，并重跑 ARMS doctor"),
     when("ARMS 权限不足", then="说明缺少的权限或 API，允许继续检查 Yunxiao/Lark，但最终 blocked"),
     when("用户无法确认 app、target、branch、service 或 SLS 选择", then="继续询问；用户拒绝或无法确认时 blocked"),
     when("YUNXIAO_ACCESS_TOKEN 缺失", then="引导 export 或 CI secret 注入并重跑 doctor；不要保存 token"),
     when("Lark webhook 缺失", then="引导提供 webhook 或设置 ARMS_LARK_WEBHOOK_URL 并重跑 config；不要发送真实通知"),
     when("单个子系统失败", then="保留已完成配置和证据，继续可安全检查的子系统，但最终不得输出 ready"),
+    when("需要缺失项闭环", then="现场引导用户补齐并重跑验证，不只把缺失项写进 setup-report.md"),
+    when("发现命令和写配置命令都可用", then="先运行只读发现命令；ARMS app、target、branch、service 和 SLS 选择必须先由用户确认"),
+    when("某个命令无法产生 JSON", then="保存 stderr、exit code、命令和修复建议到 Source Manifest，并在最终回复说明"),
+    when("无法在当前会话补齐外部权限、账号或 secret", then="完成可安全检查的部分，写 blocked 报告并列出用户下一步"),
+    when("用户只要求检查现状而不写入配置", then="只运行只读检查并报告缺口；写入 init、webhook 或 ignore 规则前先取得明确同意"),
 ])
 
-fallback_strategy(
-    [
-        when("某个命令无法产生 JSON", then="保存 stderr、exit code、命令和修复建议到 Source Manifest，并在最终回复说明"),
-        when("无法在当前会话补齐外部权限、账号或 secret", then="完成可安全检查的部分，写 blocked 报告并列出用户下一步"),
-        when("用户只要求检查现状而不写入配置", then="只运行只读检查并报告缺口；写入 init、webhook 或 ignore 规则前先取得明确同意"),
-    ],
-    require_user_approval="when_destructive",
-)
-
-safety_policy(
+quality_bar(
     must=[
         "入口始终是宿主项目根目录，不要在本 skill 源项目中写宿主配置",
         "持久化产物写入宿主项目 .arms-exceptions/setup/",
@@ -303,33 +321,12 @@ safety_policy(
         "YUNXIAO_ACCESS_TOKEN 只从环境变量读取，不写入配置、日志、报告或对话",
         "Lark webhook 可以保存到 .arms-exceptions/lark-notify.local.json，但报告和最终回复只能脱敏",
         "用户可见错误必须说明发生了什么、可能原因和可直接运行的下一步命令",
-    ],
-    must_not=[
-        "不要新增 setup CLI；本 skill 只编排现有 skills 和脚本",
-        "不要自动创建 MR、类标、评论、merge 或运行真实 Codeup 写操作",
-        "不要发送真实飞书通知；setup 阶段最多运行 dry-run 或 config --show",
-        "不要运行 ARMS sync；setup 只做配置和 readiness 验证",
-        "没有用户确认，不选择 ARMS app、target、branch、service、SLS project 或 logstore",
-        "不要自动修改宿主 AGENTS.md、CLAUDE.md 或 CI 配置，只在报告里给建议片段",
-        "不要打印或提交 AccessKey、Secret、Token、OAuth code、Authorization header、签名 URL 或完整 webhook",
-    ],
-    approval_required=[
-        "写入或替换宿主 .arms-exceptions/config.json 中的 target 配置",
-        "使用 --replace 覆盖同名 target",
-        "保存 Lark webhook 到本地忽略文件",
-        "修改宿主 .gitignore 或 .arms-exceptions/.gitignore",
-        "任何真实外部写操作、通知发送、MR 创建或产生费用的操作",
-    ],
-)
-
-quality_bar(
-    must=[
         "setup 结果只能是 ready 或 blocked，不能留下隐含未配置状态",
         "ready 必须建立在 ARMS target、branch、services、Yunxiao API doctor、Lark config 和 triage/fix 前置条件全部通过之上",
         "blocked 必须说明阻塞项、为什么当前会话不能闭环、用户下一步命令和已完成证据",
         "setup-report.md 与 source-manifest.md 都必须写入宿主项目 .arms-exceptions/setup/",
         "所有命令证据必须可追踪到 Source Manifest，且敏感值已脱敏",
-        "复杂模板和失败处理以 references/workflow.md 为细节来源",
+        "复杂模板以 references/templates/ 为细节来源，命令和失败处理以 references/commands.md 为细节来源",
     ],
     should=[
         "尽量继续完成不依赖阻塞权限的安全检查，避免丢失已闭环配置",
@@ -340,31 +337,13 @@ quality_bar(
         "不要把 setup-report.md 当作现场引导的替代品",
         "不要把未配置的 doctor 状态误报为 ready",
         "不要在报告、日志或最终回复中泄露凭证",
-    ],
-)
-
-validation(
-    [
-        check("workflow_reference_read", "执行 setup 前已读取 references/workflow.md 的模板、失败处理和 final checklist。"),
-        check("artifacts_written", "宿主项目 .arms-exceptions/setup/setup-report.md 和 source-manifest.md 已写入。"),
-        check("source_manifest_complete", "Source Manifest 包含 Sources、Produced artifacts、User decisions、Commands、Verification evidence、Closed configuration 和 Open questions / risks。"),
-        check("arms_targets_closed", "targets --json 已保存，且确认 target 有 branch、services，并满足 triage/fix 唯一定位要求。"),
-        check("yunxiao_status_closed", "yunxiao-mr doctor --json --skip-api 已记录；API doctor 已通过或 blocked 原因和下一步明确。"),
-        check("lark_status_closed", "lark-notify config --show --json 已记录；webhook 可用或 blocked 原因和下一步明确，且 webhook 脱敏。"),
-        check("ignore_rules_present", "宿主 .gitignore 和 .arms-exceptions/.gitignore 忽略 data、setup、triage、worktrees 和本地 webhook。"),
-        check("no_external_side_effects", "setup 阶段没有运行 ARMS sync、创建 MR、发送真实飞书通知或执行真实外部写操作。"),
-        check("final_status_explicit", "最终回复直接说明 ready 或 blocked，并列出关键证据和下一步。"),
-    ],
-    on_failure="report",
-)
-
-output_format(
-    name="setup_closeout",
-    required_sections=[
-        "状态：ready 或 blocked",
-        "已验证",
-        "报告路径",
-        "下一步",
+        "不要新增 setup CLI；本 skill 只编排现有 skills 和脚本",
+        "不要自动创建 MR、类标、评论、merge 或运行真实 Codeup 写操作",
+        "不要发送真实飞书通知；setup 阶段最多运行 dry-run 或 config --show",
+        "不要运行 ARMS sync；setup 只做配置和 readiness 验证",
+        "没有用户确认，不选择 ARMS app、target、branch、service、SLS project 或 logstore",
+        "不要自动修改宿主 AGENTS.md、CLAUDE.md 或 CI 配置，只在报告里给建议片段",
+        "不要打印或提交 AccessKey、Secret、Token、OAuth code、Authorization header、签名 URL 或完整 webhook",
     ],
 )
 

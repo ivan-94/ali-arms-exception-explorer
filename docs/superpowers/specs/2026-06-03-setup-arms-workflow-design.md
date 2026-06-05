@@ -81,7 +81,10 @@ Add:
 skills/setup-arms-workflow/
   SKILL.md
   references/
-    workflow.md
+    commands.md
+    checklist.md
+    ignore-rules.md
+    templates/
 ```
 
 Modify:

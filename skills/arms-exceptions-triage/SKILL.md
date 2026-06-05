@@ -8,12 +8,7 @@ from skill_contract import *
 
 skill(
     name="arms-exceptions-triage",
-    purpose="在 CI 或 Agent 自动流程中完整分诊一个 ARMS target/service 的异常，聚合诊断、判断 MR 覆盖、按需派发修复并通知结果。",
-    summary="父 Agent 只负责编排和聚合；异常详情、代码诊断、修复和测试必须交给 Sub Agent 或相邻 skill 完成。",
-    version="0.2.0",
-    short_description="编排 ARMS 异常分诊、MR 覆盖判断、修复派发和通知。",
-    tags=["arms", "triage", "subagent", "yunxiao", "lark"],
-    compatibility=["codex", "generic-agent"],
+    purpose="在 CI 或 Agent 自动流程中完整分诊一个 ARMS target/service 的异常；父 Agent 只负责编排、聚合、MR 覆盖判断、修复派发和通知。",
 )
 
 activate_when(
@@ -24,7 +19,6 @@ activate_when(
         "宿主项目需要运行 arms-exceptions-triage 编排 explorer、yunxiao-mr、fix-arms-exception 和 lark-notify",
     ],
     match="any",
-    strength="strong",
 )
 
 do_not_activate_when([
@@ -109,19 +103,52 @@ outputs(
 resources(
     references=[
         reference(
-            "references/workflow.md",
-            purpose="诊断报告模板、Sub Agent brief、二次聚合、MR 覆盖判断、summary、飞书卡片和 cleanup 细节。",
-            when="准备派发 Sub Agent、判断复聚合/MR 覆盖、生成 summary/source-manifest/lark-card 或处理异常路径时",
-            read_strategy="always",
-            grep_patterns=["Sub Agent 派发合同", "诊断后复聚合", "MR 覆盖判断", "Source Manifest", "Cleanup"],
+            "references/dedupe.md",
+            when="生成 dedupe.json 或 post-diagnosis-dedupe.json 时",
+            read_strategy="on_demand",
+        ),
+        reference(
+            "references/mr-coverage.md",
+            when="生成 existing-mrs.json 或决定是否跳过修复时",
+            read_strategy="on_demand",
+        ),
+        reference(
+            "references/templates/diagnosis-brief.md",
+            when="派发诊断 Sub Agent 时",
+            read_strategy="on_demand",
+        ),
+        reference(
+            "references/templates/diagnostic-report.md",
+            when="校验诊断报告或要求 Sub Agent 输出报告时",
+            read_strategy="on_demand",
+        ),
+        reference(
+            "references/templates/fix-brief.md",
+            when="派发 fix-arms-exception 修复 Sub Agent 时",
+            read_strategy="on_demand",
+        ),
+        reference(
+            "references/templates/fix-result.md",
+            when="校验 fix result 或汇总修复结果时",
+            read_strategy="on_demand",
+        ),
+        reference(
+            "references/templates/summary.md",
+            when="生成 summary.md 时",
+            read_strategy="on_demand",
+        ),
+        reference(
+            "references/templates/lark-card.json",
+            when="生成 lark-card.json 时",
+            read_strategy="on_demand",
         ),
     ],
 )
 
 environment(
     variables=[
-        env("YUNXIAO_ACCESS_TOKEN", required=False, secret=True, purpose="yunxiao-mr 只从环境变量读取的访问 token；不得写入报告。"),
-        env("ARMS_LARK_WEBHOOK_URL", required=False, secret=True, purpose="lark-notify 的可选 webhook 来源；不得打印完整 URL。"),
+        env("YUNXIAO_ACCESS_TOKEN", required=False, secret=True, when="执行 Yunxiao MR 覆盖判断或创建 MR 时；只从环境变量读取，不得写入报告。"),
+        env("ARMS_LARK_WEBHOOK_URL", required=False, secret=True, when="通过 lark-notify 发送通知时；不得打印完整 URL。"),
     ],
     commands=["python3", "git", "rg"],
     network="required",
@@ -188,7 +215,7 @@ workflow(
                 "arms-diagnosis",
                 "diagnose each retained ARMS exception group without editing business code",
                 how="spawn one or more medium-effort diagnostic Sub Agents with the reference workflow diagnostic brief; require each report at HOST_ROOT/.arms-exceptions/triage/<run-id>/subagents/diagnose-<stable-slug>.md and require Source Manifest sections",
-                context="isolated diagnostic context with HOST_ROOT, TRIAGE_WORKTREE_ROOT, groups.json, dedupe.json, and references/workflow.md brief only",
+                context="isolated diagnostic context with HOST_ROOT, TRIAGE_WORKTREE_ROOT, groups.json, dedupe.json, references/templates/diagnosis-brief.md, and references/templates/diagnostic-report.md only",
                 effort="medium",
                 result_path="HOST_ROOT/.arms-exceptions/triage/<run-id>/subagents/diagnose-<stable-slug>.md",
                 expect="diagnostic reports with status noise | needs_human | bug, confidence, evidence, code paths when bug, repair suggestion, tests, and Source Manifest",
@@ -233,7 +260,7 @@ workflow(
                 "arms-fix",
                 "run fix-arms-exception for one representative bug diagnosis and create a Yunxiao MR when fixable",
                 how="spawn high-effort fix Sub Agents with diagnostic_report, result_path, target, branch, representative_group_id, and covered_duplicate_group_ids; require TDD, review, MR creation when fixed, and a final report at result_path",
-                context="isolated fix context anchored at HOST_ROOT plus the diagnostic report and references/workflow.md fix brief",
+                context="isolated fix context anchored at HOST_ROOT plus the diagnostic report, references/templates/fix-brief.md, and references/templates/fix-result.md",
                 effort="high",
                 result_path="HOST_ROOT/.arms-exceptions/triage/<run-id>/subagents/fix-<stable-slug>.md",
                 expect="fix result reports with status fixed | blocked | needs_human, branch, MR URL, verification, review result, risks, and Source Manifest",
@@ -272,7 +299,7 @@ workflow(
             )}。
             """,
             reads=["lark_card_json"],
-            produces=["notification_result", "triage_artifacts"],
+            writes=["notification_result", "triage_artifacts"],
         ),
     ],
     name="triage_run",
@@ -286,27 +313,18 @@ decision_rules([
     when("execution_mode is full_auto and representative item is status=bug and not strongly MR-covered", then="dispatch SubAgent(high) with fix-arms-exception"),
     when("Sub Agent report omits required status, evidence, code path for bug, or output_path", then="mark blocked/needs_human or dispatch supplemental diagnosis before MR coverage or fix"),
     when("trace_console_url is absent", then="show sample_trace_id and local show <group_id> --json command; never guess an Aliyun trace URL"),
-    prefer("HOST_ROOT/.arms-exceptions/triage/<run-id>/ for all durable artifacts", over="relative paths inside TRIAGE_WORKTREE_ROOT", reason="downstream agents need stable host-owned evidence paths"),
-    prefer("post-diagnosis dedupe before MR coverage and fix dispatch", over="fixing each original group_id independently", reason="diagnosis output is new evidence and may collapse duplicate bugs"),
-])
-
-failure_modes([
     when("doctor, targets, sync, groups, yunxiao-mr, or lark-notify fails with a user-fixable configuration problem", then="write blocked/needs_human with what happened, likely reason, and the next command to fix it"),
     when("external API credentials or permissions are missing", then="do not print secrets; record the missing capability and notify using any available safe channel"),
     when("Sub Agent cannot complete diagnosis or fix", then="preserve its report path, status, verification evidence, and open risks; do not invent missing evidence"),
     when("cleanup cannot safely remove a worktree", then="keep the path and record the exact non-destructive cleanup recommendation"),
+    when("需要持久化产物", then="始终写入 HOST_ROOT/.arms-exceptions/triage/<run-id>/，不要写到 TRIAGE_WORKTREE_ROOT 的相对路径"),
+    when("诊断报告产出新根因证据", then="先做 post-diagnosis dedupe，再做 MR 覆盖判断和 fix 派发"),
+    when("TRIAGE_WORKTREE_ROOT cannot be created but read-only triage can safely run in HOST_ROOT", then="record the degraded cwd choice in source-manifest.md and continue only if it does not touch business code"),
+    when("Yunxiao MR coverage cannot be queried", then="treat coverage as unknown/maybe_related and do not skip a fix solely because MR data is unavailable"),
+    when("Lark notification cannot be sent", then="keep lark-card.json and summary.md locally, record the masked send failure, and return notification_result accordingly"),
 ])
 
-fallback_strategy(
-    [
-        when("TRIAGE_WORKTREE_ROOT cannot be created but read-only triage can safely run in HOST_ROOT", then="record the degraded cwd choice in source-manifest.md and continue only if it does not touch business code"),
-        when("Yunxiao MR coverage cannot be queried", then="treat coverage as unknown/maybe_related and do not skip a fix solely because MR data is unavailable"),
-        when("Lark notification cannot be sent", then="keep lark-card.json and summary.md locally, record the masked send failure, and return notification_result accordingly"),
-    ],
-    require_user_approval="when_destructive",
-)
-
-safety_policy(
+quality_bar(
     must=[
         "一次只处理一个 target；service 输入必须唯一反查 target，不得静默跨多个 target",
         "父 Agent 只能协调、调度、聚合、判断和通知；不得亲自读取、搜索、分析或修改业务代码",
@@ -314,23 +332,6 @@ safety_policy(
         "复聚合和 MR 覆盖判断只能使用 groups --json 元数据、Sub Agent 报告、post-diagnosis-dedupe.json 和 yunxiao-mr 输出",
         "所有 Sub Agent brief 和持久产物必须包含可重读的 Source Manifest",
         "summary.md、lark-card.json 和用户可见结论使用中文",
-    ],
-    must_not=[
-        "不要在诊断后复聚合完成前派发 fix-arms-exception",
-        "不要把 group_id 当作跨运行 MR 覆盖强证据",
-        "不要清理用户当前工作区、非 HOST_ROOT/.arms-exceptions/worktrees/ 路径或无法确认属于本次运行的 worktree",
-        "不要打印或提交 AccessKey、Secret、Token、SecurityToken、OAuth code、Authorization header、签名 URL 或完整 webhook",
-        "不要让 lark-notify 承担 ARMS 字段解释；业务卡片由 triage 生成 raw payload",
-    ],
-    approval_required=[
-        "跨多个 target 执行",
-        "强制删除 dirty worktree 或 HOST_ROOT/.arms-exceptions/worktrees/ 之外的路径",
-        "改变 full_auto/triage_only 之外的修复派发策略",
-    ],
-)
-
-quality_bar(
-    must=[
         "target/service、services、branch、window、HOST_ROOT、TRIAGE_WORKTREE_ROOT 和 run_id 明确记录",
         "source-manifest.md 记录 Sources、Produced artifacts、Key decisions、Verification evidence 和 Open questions / risks",
         "diagnostic Sub Agent brief 和 fix Sub Agent brief 不依赖聊天上下文即可执行",
@@ -348,20 +349,12 @@ quality_bar(
         "不得用父 Agent 猜测补足 Sub Agent 未提供的根因、代码路径或测试建议",
         "不得把初筛没有合并的 group 直接视为不同 bug",
         "不得因为 maybe_related 或查询失败跳过明确 bug 的修复派发",
+        "不要在诊断后复聚合完成前派发 fix-arms-exception",
+        "不要把 group_id 当作跨运行 MR 覆盖强证据",
+        "不要清理用户当前工作区、非 HOST_ROOT/.arms-exceptions/worktrees/ 路径或无法确认属于本次运行的 worktree",
+        "不要打印或提交 AccessKey、Secret、Token、SecurityToken、OAuth code、Authorization header、签名 URL 或完整 webhook",
+        "不要让 lark-notify 承担 ARMS 字段解释；业务卡片由 triage 生成 raw payload",
     ],
-)
-
-validation(
-    [
-        check("scope_unique", "target_or_service 已解析到单个 target，且 target.branch 来自 .arms-exceptions/config.json 或 targets --json。"),
-        check("artifacts_host_owned", "所有 triage 产物位于 HOST_ROOT/.arms-exceptions/triage/<run-id>/，worktree 位于 HOST_ROOT/.arms-exceptions/worktrees/。"),
-        check("parent_boundary_preserved", "父 Agent 没有打开、搜索、阅读或修改业务代码，也没有亲自调用 show/logs 做异常详情探索。"),
-        check("source_manifest_complete", "summary、Sub Agent 报告和持久产物包含 Source Manifest 五个章节。"),
-        check("post_diagnosis_before_fix", "fix-arms-exception 派发发生在 post-diagnosis-dedupe.json 生成和 MR 覆盖判断之后。"),
-        check("secret_redaction", "summary.md、lark-card.json、source-manifest.md、Sub Agent 报告和最终回复不包含凭证、Authorization header、签名 URL 或完整 webhook。"),
-        check("notification_or_local_payload", "lark-notify 成功发送，或 notification_result 记录无法发送原因并保留 lark-card.json 路径。"),
-    ],
-    on_failure="report",
 )
 
 examples([
