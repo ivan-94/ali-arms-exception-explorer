@@ -30,7 +30,7 @@ npx skills@latest add ivan-94/ali-arms-exception-explorer
 | --- | --- |
 | [`setup-arms-workflow`](./skills/setup-arms-workflow/SKILL.md) | 在宿主项目检查依赖、发现 ARMS/SLS/Yunxiao/Lark 配置，并生成本地 setup 报告。 |
 | [`arms-exceptions-explorer`](./skills/arms-exceptions-explorer/SKILL.md) | 从宿主项目拉取、聚合并查看阿里云 ARMS 异常 Span，为 Agent 提供可追溯的异常证据。 |
-| [`arms-exceptions-triage`](./skills/arms-exceptions-triage/SKILL.md) | 针对一个 ARMS target/service 自动分诊异常，去重诊断、关联云效 MR，并在明确是 bug 时调度修复。 |
+| [`arms-exceptions-triage`](./skills/arms-exceptions-triage/SKILL.md) | 针对一个 ARMS target/service 自动分诊异常，去重诊断、关联云效 MR，并产出待人工 review 的修复候选；人工 review 通过后才调度修复。 |
 | [`fix-arms-exception`](./skills/fix-arms-exception/SKILL.md) | 从 `status=bug` 的诊断报告出发，在独立 worktree 中 TDD 修复异常，并创建云效 MR。 |
 | [`yunxiao-mr`](./skills/yunxiao-mr/SKILL.md) | 管理云效 Codeup 合并请求，包括创建、列举、查看、更新、评论、类标、关闭、重开和合并。 |
 | [`lark-notify`](./skills/lark-notify/SKILL.md) | 通过飞书/Lark 自定义机器人 Webhook 发送 Agent 通知，例如分诊报告、修复结果和 MR 链接。 |
@@ -40,6 +40,7 @@ npx skills@latest add ivan-94/ali-arms-exception-explorer
 - 这个仓库是 skill 源项目；日常使用时应安装到具体宿主项目，再让 Agent 在宿主项目里执行。
 - 凭证交给宿主环境或官方工具处理：阿里云走 `aliyun` CLI 默认凭证链，云效走 `YUNXIAO_ACCESS_TOKEN`，飞书 Webhook 保存在本地忽略文件或环境变量中。
 - 不要提交本地调查数据、setup 报告、triage 产物、worktree、缓存、SQLite 数据库或 Webhook 文件。
+- `arms-exceptions-triage` 默认不会直接修复明确 bug；人工 review 通过后才会派发 `fix-arms-exception`。
 - `fix-arms-exception` 可以创建修复分支和云效 MR，但不会自动合并 MR。
 - 真实 ARMS、云效或飞书操作需要宿主项目已有权限和用户明确授权。
 

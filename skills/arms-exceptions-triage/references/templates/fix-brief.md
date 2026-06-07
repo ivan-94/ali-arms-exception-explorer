@@ -1,6 +1,6 @@
 # ARMS 修复任务
 
-父 Agent 派发修复 Sub Agent 时，brief 必须从诊断报告开始，并明确 `result_path`。
+父 Agent 只有在人工 review 明确通过后才能派发修复 Sub Agent。brief 必须从诊断报告开始，记录人工 review 通过证据，并明确 `result_path`。
 
 ```markdown
 # ARMS 修复任务
@@ -13,14 +13,17 @@
 - branch:
 - representative_group_id:
 - covered_duplicate_group_ids:
+- human_review_approval:
 
 ## 必须执行
+- 确认 human_review_approval 已明确允许本项进入修复
 - 使用 `fix-arms-exception`，从 diagnostic_report 开始
 - 在独立 `.arms-exceptions/worktrees/fix-<stable-slug>/` worktree 中修复
 - TDD：先复现或写失败回归测试，再修复
 - 创建 Yunxiao MR 后，把最终修复结果写入 result_path
 
 ## 禁止
+- 未获人工 review 明确通过时，不执行修复
 - 不自动合并 MR
 - 不 push 非 `fix/arms-` 分支
 - 不删除自己的 worktree；父 Agent 汇总后清理

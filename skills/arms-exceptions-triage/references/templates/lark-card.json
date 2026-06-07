@@ -16,7 +16,7 @@
         "tag": "div",
         "text": {
           "tag": "lark_md",
-          "content": "**结论**\n状态：<ready|blocked|fixed|needs_human>\n目标：<target>\n分支：<branch>"
+          "content": "**结论**\n状态：<ready|pending_human_review|review_approved_fix|blocked|needs_human>\n目标：<target>\n分支：<branch>"
         }
       },
       {
@@ -26,7 +26,7 @@
         "tag": "div",
         "text": {
           "tag": "lark_md",
-          "content": "**修复项**\n<short_title>\n异常组：<group_id>\nTrace：<sample_trace_id>\n[查看调用链](<trace_console_url>)"
+          "content": "**待人工 review 项**\n<short_title>\n异常组：<group_id>\nTrace：<sample_trace_id>\n下一步：人工 review 通过后再派发修复\n[查看调用链](<trace_console_url>)"
         }
       }
     ]

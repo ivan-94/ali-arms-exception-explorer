@@ -1,6 +1,6 @@
 ---
 name: arms-exceptions-triage
-description: 在 CI 或 Agent 自动流程中分诊单个 ARMS target/service，编排 explorer、Yunxiao MR、fix-arms-exception 与 Lark 通知，产出本地 triage 报告；除非用户显式要求 triage-only，否则对明确 bug 且无强证据 MR 覆盖的代表项派发 SubAgent(high) 修复。Use when 用户要求分诊、排查、汇总、处理或完整处理 ARMS 异常。
+description: 在 CI 或 Agent 自动流程中分诊单个 ARMS target/service，编排 explorer、Yunxiao MR 与 Lark 通知，产出待人工 review 的本地 triage 报告；只有人工 review 明确通过后，才对明确 bug 且无强证据 MR 覆盖的代表项派发 fix-arms-exception。Use when 用户要求分诊、排查、汇总、处理或完整处理 ARMS 异常。
 ---
 
 ```python
@@ -8,14 +8,14 @@ from skill_contract import *
 
 skill(
     name="arms-exceptions-triage",
-    purpose="在 CI 或 Agent 自动流程中完整分诊一个 ARMS target/service 的异常；父 Agent 只负责编排、聚合、MR 覆盖判断、修复派发和通知。",
+    purpose="在 CI 或 Agent 自动流程中完整分诊一个 ARMS target/service 的异常；父 Agent 只负责编排、聚合、MR 覆盖判断、人工 review gate、获批后的修复派发和通知。",
 )
 
 activate_when(
     [
         "用户要求分诊、排查、汇总、处理或完整处理 ARMS 异常",
         "用户要求在 CI 或 Agent 自动流程中处理一个 ARMS target 或 service 的异常",
-        "用户要求对 ARMS 异常做去重诊断、关联 Yunxiao MR、派发修复或发送 Lark 通知",
+        "用户要求对 ARMS 异常做去重诊断、关联 Yunxiao MR、准备人工 review、派发已获批修复或发送 Lark 通知",
         "宿主项目需要运行 arms-exceptions-triage 编排 explorer、yunxiao-mr、fix-arms-exception 和 lark-notify",
     ],
     match="any",
@@ -54,14 +54,20 @@ inputs(
         input(
             "execution_mode",
             type=Text,
-            description="full_auto 或 triage_only；除非用户显式要求 triage-only/只分诊，否则默认 full_auto。",
-            default="full_auto",
+            description="triage_only 或 review_approved_fix；默认 triage_only，只产出待人工 review 的分诊报告。只有调用方明确说明人工 review 已通过时才能使用 review_approved_fix。",
+            default="triage_only",
             required=False,
         ),
         input(
             "run_id",
             type=Text,
             description="本次 triage 产物目录 ID；未提供时生成 <YYYYMMDDTHHMMSS>-<target-or-service>。",
+            required=False,
+        ),
+        input(
+            "human_review_approval",
+            type=Text,
+            description="人工 review 通过证据，例如用户明确批准语句、审批记录路径或 review 结论摘要；只有 execution_mode=review_approved_fix 时需要。",
             required=False,
         ),
     ],
@@ -83,7 +89,7 @@ outputs(
         output(
             "summary_report",
             type=File,
-            description="中文 summary.md，记录分诊结论、代表异常、重复合并、MR 覆盖、修复结果、风险和下一步。",
+            description="中文 summary.md，记录分诊结论、代表异常、重复合并、MR 覆盖、人工 review 状态、风险和下一步。",
         ),
         output(
             "notification_result",
@@ -95,7 +101,7 @@ outputs(
         output(
             "fix_results",
             type=Text,
-            description="full_auto 模式下 SubAgent(high) 执行 fix-arms-exception 后写回的 MR、blocked 或 needs_human 结果。",
+            description="review_approved_fix 模式下 SubAgent(high) 执行 fix-arms-exception 后写回的 MR、blocked 或 needs_human 结果。",
         ),
     ],
 )
@@ -109,7 +115,7 @@ resources(
         ),
         reference(
             "references/mr-coverage.md",
-            when="生成 existing-mrs.json 或决定是否跳过修复时",
+            when="生成 existing-mrs.json 或决定是否进入人工 review 时",
             read_strategy="on_demand",
         ),
         reference(
@@ -240,7 +246,7 @@ workflow(
                 how="run list --state opened --json and targeted view/search checks as needed; compare MR title/body/comments against diagnostic report fields, root cause, code path, branch, service, operation, and normalized message",
                 mode="compose",
                 expect="existing-mrs.json with covered, maybe_related, or not_related decisions and evidence for each representative item",
-                on_failure="record maybe_related or blocked rather than skipping a fix on weak evidence",
+                on_failure="record maybe_related or blocked rather than marking an item covered on weak evidence",
             )}。
             """,
             reads=["post_diagnosis_dedupe_json"],
@@ -248,18 +254,25 @@ workflow(
         ),
         step(
             "write_summary_and_payload",
-            "生成中文 summary.md、source-manifest.md 和业务专用 lark-card.json；卡片只放摘要、统计、代表异常、MR 和下一步，长详情留在本地 summary.md。",
+            "生成中文 summary.md、source-manifest.md 和业务专用 lark-card.json；卡片只放摘要、统计、代表异常、MR、人工 review 状态和下一步，长详情留在本地 summary.md。",
             reads=["groups_json", "dedupe_json", "post_diagnosis_dedupe_json", "existing_mrs_json"],
             writes=["summary_report", "lark_card_json", "source_manifest"],
         ),
         step(
+            "record_human_review_gate",
+            "把所有 status=bug 且未被强证据 MR 覆盖的代表项标记为 pending_human_review，列出建议 review 关注点、诊断报告路径、MR 覆盖证据和获批后可执行的修复派发参数；未获人工 review 通过时必须到此停止，不创建修复 worktree、不派发 fix-arms-exception。",
+            reads=["post_diagnosis_dedupe_json", "existing_mrs_json", "summary_report"],
+            writes=["summary_report", "lark_card_json", "source_manifest"],
+            when="execution_mode is triage_only or human review approval is not explicitly recorded",
+        ),
+        step(
             "dispatch_fixes",
             f"""
-            full_auto 模式下，对 post-diagnosis-dedupe.json 中 status=bug 且未被强证据 MR 覆盖的代表项派发 SubAgent(high) 执行 fix-arms-exception；triage_only 模式必须跳过修复并记录原因。
+            review_approved_fix 模式下，且 source-manifest.md 已记录人工 review 通过证据时，对 post-diagnosis-dedupe.json 中 status=bug 且未被强证据 MR 覆盖的代表项派发 SubAgent(high) 执行 fix-arms-exception；triage_only 模式或缺少人工 review 通过证据时必须跳过修复并记录原因。
             使用 {call_subagent(
                 "arms-fix",
                 "run fix-arms-exception for one representative bug diagnosis and create a Yunxiao MR when fixable",
-                how="spawn high-effort fix Sub Agents with diagnostic_report, result_path, target, branch, representative_group_id, and covered_duplicate_group_ids; require TDD, review, MR creation when fixed, and a final report at result_path",
+                how="after explicit human review approval, spawn high-effort fix Sub Agents with diagnostic_report, result_path, target, branch, representative_group_id, covered_duplicate_group_ids, and the recorded approval evidence; require TDD, review, MR creation when fixed, and a final report at result_path",
                 context="isolated fix context anchored at HOST_ROOT plus the diagnostic report, references/templates/fix-brief.md, and references/templates/fix-result.md",
                 effort="high",
                 result_path="HOST_ROOT/.arms-exceptions/triage/<run-id>/subagents/fix-<stable-slug>.md",
@@ -267,9 +280,9 @@ workflow(
                 on_failure="record blocked in summary/source-manifest; do not assume the MR exists or the fix succeeded",
             )}。
             """,
-            reads=["execution_mode", "post_diagnosis_dedupe_json", "existing_mrs_json"],
+            reads=["execution_mode", "human_review_approval", "post_diagnosis_dedupe_json", "existing_mrs_json", "source_manifest"],
             writes=["fix_results", "source_manifest"],
-            when="execution_mode is full_auto and at least one representative bug is not strongly covered by an MR",
+            when="execution_mode is review_approved_fix, human review approval is explicitly recorded, and at least one representative bug is not strongly covered by an MR",
         ),
         step(
             "cleanup_fix_worktrees",
@@ -309,8 +322,8 @@ decision_rules([
     when("target_or_service names a target", then="process all configured services under that target"),
     when("target_or_service names a service", then="resolve it to exactly one target from targets --json; otherwise stop and ask the caller to pass target"),
     when("target has no configured branch", then="stop as blocked and do not guess main/master/dev"),
-    when("execution_mode is triage_only or the caller explicitly says 只分诊", then="skip dispatch_fixes and record that repair was intentionally skipped"),
-    when("execution_mode is full_auto and representative item is status=bug and not strongly MR-covered", then="dispatch SubAgent(high) with fix-arms-exception"),
+    when("execution_mode is triage_only or the caller has not explicitly provided human review approval", then="skip dispatch_fixes, mark fixable uncovered bugs as pending_human_review, and record the approval gate"),
+    when("execution_mode is review_approved_fix and representative item is status=bug and not strongly MR-covered", then="dispatch SubAgent(high) with fix-arms-exception only after recording the human review approval evidence"),
     when("Sub Agent report omits required status, evidence, code path for bug, or output_path", then="mark blocked/needs_human or dispatch supplemental diagnosis before MR coverage or fix"),
     when("trace_console_url is absent", then="show sample_trace_id and local show <group_id> --json command; never guess an Aliyun trace URL"),
     when("doctor, targets, sync, groups, yunxiao-mr, or lark-notify fails with a user-fixable configuration problem", then="write blocked/needs_human with what happened, likely reason, and the next command to fix it"),
@@ -318,9 +331,9 @@ decision_rules([
     when("Sub Agent cannot complete diagnosis or fix", then="preserve its report path, status, verification evidence, and open risks; do not invent missing evidence"),
     when("cleanup cannot safely remove a worktree", then="keep the path and record the exact non-destructive cleanup recommendation"),
     when("需要持久化产物", then="始终写入 HOST_ROOT/.arms-exceptions/triage/<run-id>/，不要写到 TRIAGE_WORKTREE_ROOT 的相对路径"),
-    when("诊断报告产出新根因证据", then="先做 post-diagnosis dedupe，再做 MR 覆盖判断和 fix 派发"),
+    when("诊断报告产出新根因证据", then="先做 post-diagnosis dedupe，再做 MR 覆盖判断和人工 review gate，获批后才允许 fix 派发"),
     when("TRIAGE_WORKTREE_ROOT cannot be created but read-only triage can safely run in HOST_ROOT", then="record the degraded cwd choice in source-manifest.md and continue only if it does not touch business code"),
-    when("Yunxiao MR coverage cannot be queried", then="treat coverage as unknown/maybe_related and do not skip a fix solely because MR data is unavailable"),
+    when("Yunxiao MR coverage cannot be queried", then="treat coverage as unknown/maybe_related and do not mark a bug as MR-covered solely because MR data is unavailable"),
     when("Lark notification cannot be sent", then="keep lark-card.json and summary.md locally, record the masked send failure, and return notification_result accordingly"),
 ])
 
@@ -330,25 +343,28 @@ quality_bar(
         "父 Agent 只能协调、调度、聚合、判断和通知；不得亲自读取、搜索、分析或修改业务代码",
         "异常详情、stacktrace、日志详情、代码路径、根因、修复方案和测试范围判断必须由诊断或修复 Sub Agent 完成",
         "复聚合和 MR 覆盖判断只能使用 groups --json 元数据、Sub Agent 报告、post-diagnosis-dedupe.json 和 yunxiao-mr 输出",
+        "未获人工 review 明确通过前，不得派发 fix-arms-exception、创建修复 worktree 或创建修复 MR",
         "所有 Sub Agent brief 和持久产物必须包含可重读的 Source Manifest",
         "summary.md、lark-card.json 和用户可见结论使用中文",
         "target/service、services、branch、window、HOST_ROOT、TRIAGE_WORKTREE_ROOT 和 run_id 明确记录",
         "source-manifest.md 记录 Sources、Produced artifacts、Key decisions、Verification evidence 和 Open questions / risks",
         "diagnostic Sub Agent brief 和 fix Sub Agent brief 不依赖聊天上下文即可执行",
-        "post-diagnosis-dedupe.json 记录代表项、合并项、合并原因、诊断报告路径和是否进入 MR 覆盖/修复",
+        "post-diagnosis-dedupe.json 记录代表项、合并项、合并原因、诊断报告路径和是否进入 MR 覆盖/人工 review",
         "existing-mrs.json 区分 covered、maybe_related 和 not_related，并保留证据",
-        "summary.md 展示复聚合前后数量、代表异常、重复项、MR、修复结果、证据路径和剩余风险",
+        "summary.md 展示复聚合前后数量、代表异常、重复项、MR、人工 review 状态、证据路径和剩余风险",
         "lark-card.json 不含凭证或签名 URL，且长详情留在本地 summary.md",
     ],
     should=[
         "父 Agent 自行决定 Sub Agent 并发，并在 source-manifest.md 记录调度理由",
         "blocked/needs_human 结论包含发生了什么、为什么可能发生、下一步怎么修复",
-        "可修 bug 的 fix result 包含 TDD、review、MR URL 和未解决风险",
+        "待人工 review 项包含建议 review 关注点、获批后可执行的修复派发参数和未解决风险",
+        "获批后执行的 fix result 包含 TDD、review、MR URL 和未解决风险",
     ],
     must_not=[
         "不得用父 Agent 猜测补足 Sub Agent 未提供的根因、代码路径或测试建议",
         "不得把初筛没有合并的 group 直接视为不同 bug",
-        "不得因为 maybe_related 或查询失败跳过明确 bug 的修复派发",
+        "不得因为 maybe_related 或查询失败把明确 bug 判定为已有 MR 覆盖",
+        "不要在人工 review 明确通过前派发 fix-arms-exception",
         "不要在诊断后复聚合完成前派发 fix-arms-exception",
         "不要把 group_id 当作跨运行 MR 覆盖强证据",
         "不要清理用户当前工作区、非 HOST_ROOT/.arms-exceptions/worktrees/ 路径或无法确认属于本次运行的 worktree",
@@ -360,13 +376,18 @@ quality_bar(
 examples([
     example(
         user="分诊 ai-service-dev 最近 2 小时 ARMS 异常",
-        expected_behavior="解析 ai-service-dev 为单个 target，默认 full_auto：sync、groups、初筛 dedupe、派发诊断、诊断后复聚合、MR 覆盖判断、对明确且未覆盖 bug 派发 fix-arms-exception，最后生成 summary/source-manifest/lark-card 并发送通知。",
+        expected_behavior="解析 ai-service-dev 为单个 target，默认 triage_only：sync、groups、初筛 dedupe、派发诊断、诊断后复聚合、MR 覆盖判断；对明确且未覆盖 bug 标记 pending_human_review，生成 summary/source-manifest/lark-card 并发送通知，但不派发 fix-arms-exception。",
         output="triage_artifacts",
     ),
     example(
         user="只分诊 ai-service-dev-celery-worker，不要修",
-        expected_behavior="选择 triage_only：完成 sync、groups、dedupe、诊断、post-diagnosis dedupe、MR 覆盖和中文 summary，但跳过 fix SubAgent(high)，并在 summary/source-manifest 记录用户显式跳过修复。",
+        expected_behavior="选择 triage_only：完成 sync、groups、dedupe、诊断、post-diagnosis dedupe、MR 覆盖和中文 summary，但跳过 fix SubAgent(high)，并在 summary/source-manifest 记录未进入人工 review 后修复阶段。",
         output="summary_report",
+    ),
+    example(
+        user="人工 review 已通过，继续修复 ai-service-dev 的待修复 ARMS 异常",
+        expected_behavior="选择 review_approved_fix：先重读 summary/source-manifest、post-diagnosis-dedupe.json、existing-mrs.json 和人工 review 通过证据；只对 status=bug 且未被强证据 MR 覆盖的代表项派发 fix-arms-exception。",
+        output="fix_results",
     ),
     example(
         user="处理 service=api-worker 的 ARMS 异常",

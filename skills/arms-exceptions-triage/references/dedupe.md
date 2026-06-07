@@ -42,7 +42,7 @@
 - 共同修复范围；
 - 合并原因；
 - 是否进入 MR 覆盖判断；
-- 是否进入 `fix-arms-exception`。
+- 是否进入人工 review；人工 review 通过后是否可进入 `fix-arms-exception`。
 
 复聚合比较维度：
 
@@ -72,7 +72,7 @@
 复聚合后：
 
 - 被合并项不再独立进入 MR 覆盖判断；
-- 被合并项不再独立派发 `fix-arms-exception`；
+- 被合并项不再独立进入人工 review 或派发 `fix-arms-exception`；
 - 代表项的 MR 覆盖判断必须把所有被合并项的异常指纹和诊断报告作为辅助证据；
 - `summary.md` 必须展示复聚合前后数量、代表项和被合并重复项；
 - `source-manifest.md` 必须记录读取的诊断报告、合并决策和未合并原因；

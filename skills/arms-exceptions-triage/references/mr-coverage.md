@@ -21,8 +21,8 @@
 
 状态：
 
-- `covered`：opened 或 recently merged MR 命中同一错误指纹和代码路径/根因，跳过修复。
-- `maybe_related`：只命中 message、service、文件名或相近标题，不跳过修复。
+- `covered`：opened 或 recently merged MR 命中同一错误指纹和代码路径/根因，不进入待修复 review 列表。
+- `maybe_related`：只命中 message、service、文件名或相近标题，不能作为跳过人工 review 或获批后修复派发的依据。
 - `not_related`：无稳定证据。
 
 closed MR 默认不算解决，除非评论明确指向替代 MR 或已发布修复。
